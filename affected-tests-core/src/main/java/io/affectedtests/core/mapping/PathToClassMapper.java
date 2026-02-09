@@ -112,20 +112,34 @@ public final class PathToClassMapper {
 
     /**
      * Extracts the module prefix from a file path (e.g., "api" from "api/src/main/java/...").
-     * Returns empty string if no module prefix.
+     * Uses boundary-aware matching to avoid false positives when a source directory name
+     * appears as a substring of a module name (e.g., "someapi/src/main/java" won't match "api/src/main/java").
+     *
+     * @param filePath the relative file path from git diff
+     * @return the module prefix, or empty string if no module prefix
      */
     public String extractModule(String filePath) {
         String normalized = filePath.replace('\\', '/');
-        for (String sourceDir : config.sourceDirs()) {
-            int idx = normalized.indexOf(sourceDir);
-            if (idx > 0) {
-                return normalized.substring(0, idx - 1); // strip trailing /
-            }
+        String module = extractModuleFromDirs(normalized, config.sourceDirs());
+        if (!module.isEmpty()) {
+            return module;
         }
-        for (String testDir : config.testDirs()) {
-            int idx = normalized.indexOf(testDir);
+        return extractModuleFromDirs(normalized, config.testDirs());
+    }
+
+    private String extractModuleFromDirs(String normalizedPath, java.util.List<String> dirs) {
+        for (String dir : dirs) {
+            String normalizedDir = dir.replace('\\', '/');
+            // Ensure the source dir is preceded by a "/" boundary or is at the start
+            String withSlash = "/" + normalizedDir;
+            int idx = normalizedPath.indexOf(withSlash);
             if (idx > 0) {
-                return normalized.substring(0, idx - 1);
+                // Module is everything before the "/" that precedes the source dir
+                return normalizedPath.substring(0, idx);
+            }
+            // Also check if the path starts directly with the source dir (no module prefix)
+            if (normalizedPath.startsWith(normalizedDir)) {
+                return "";
             }
         }
         return "";

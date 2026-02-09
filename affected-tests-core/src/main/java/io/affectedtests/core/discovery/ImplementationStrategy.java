@@ -9,9 +9,8 @@ import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -81,22 +80,24 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         // Build simple name lookup
         Map<String, String> simpleNameToFqn = new HashMap<>();
         for (String fqn : changedClasses) {
-            simpleNameToFqn.put(simpleClassName(fqn), fqn);
+            simpleNameToFqn.put(SourceFileScanner.simpleClassName(fqn), fqn);
         }
 
         // 1. Naming convention: look for *Impl classes
+        Set<String> allSourceFqns = collectSourceFqns(projectDir);
         for (String suffix : config.implementationNaming()) {
             for (String fqn : changedClasses) {
-                String simpleName = simpleClassName(fqn);
-                // Search for classes with this suffix appended
-                String implName = simpleName + suffix;
-                Set<String> found = findClassesBySimpleName(implName, projectDir);
-                implementations.addAll(found);
+                String implSimpleName = SourceFileScanner.simpleClassName(fqn) + suffix;
+                for (String sourceFqn : allSourceFqns) {
+                    if (SourceFileScanner.simpleClassName(sourceFqn).equals(implSimpleName)) {
+                        implementations.add(sourceFqn);
+                    }
+                }
             }
         }
 
         // 2. AST scanning: find classes that extend/implement changed types
-        List<Path> sourceFiles = collectSourceFiles(projectDir);
+        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
         JavaParser parser = new JavaParser();
 
         for (Path sourceFile : sourceFiles) {
@@ -138,91 +139,27 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         return implementations;
     }
 
-    private Set<String> findClassesBySimpleName(String simpleName, Path projectDir) {
-        Set<String> found = new LinkedHashSet<>();
+    /**
+     * Collects FQNs for all source files under project dir (used for naming-convention matching).
+     */
+    private Set<String> collectSourceFqns(Path projectDir) {
+        Set<String> fqns = new LinkedHashSet<>();
         for (String sourceDir : config.sourceDirs()) {
             Path sourcePath = projectDir.resolve(sourceDir);
             if (Files.isDirectory(sourcePath)) {
-                findJavaFileByName(sourcePath, simpleName + ".java", found, sourcePath);
-            }
-            // Also check sub-modules
-            try (var dirs = Files.walk(projectDir, 1)) {
-                dirs.filter(Files::isDirectory)
-                    .filter(d -> !d.equals(projectDir))
-                    .forEach(moduleDir -> {
-                        Path modSourcePath = moduleDir.resolve(sourceDir);
-                        if (Files.isDirectory(modSourcePath)) {
-                            findJavaFileByName(modSourcePath, simpleName + ".java", found, modSourcePath);
-                        }
-                    });
-            } catch (IOException e) {
-                log.warn("Error scanning modules for impl classes", e);
-            }
-        }
-        return found;
-    }
-
-    private void findJavaFileByName(Path root, String fileName, Set<String> results, Path sourceRoot) {
-        try {
-            Files.walkFileTree(root, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (file.getFileName().toString().equals(fileName)) {
-                        Path relative = sourceRoot.relativize(file);
-                        String fqn = relative.toString()
-                                .replace(java.io.File.separatorChar, '.')
-                                .replace('/', '.');
-                        if (fqn.endsWith(".java")) {
-                            fqn = fqn.substring(0, fqn.length() - 5);
-                        }
-                        results.add(fqn);
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-        } catch (IOException e) {
-            log.warn("Error searching for {} in {}", fileName, root, e);
-        }
-    }
-
-    private List<Path> collectSourceFiles(Path projectDir) {
-        List<Path> files = new ArrayList<>();
-        for (String sourceDir : config.sourceDirs()) {
-            Path sourcePath = projectDir.resolve(sourceDir);
-            if (Files.isDirectory(sourcePath)) {
-                collectJavaFiles(sourcePath, files);
+                fqns.addAll(SourceFileScanner.fqnsUnder(sourcePath));
             }
             // sub-modules
-            try (var dirs = Files.walk(projectDir, 1)) {
-                dirs.filter(Files::isDirectory)
-                    .filter(d -> !d.equals(projectDir))
-                    .forEach(moduleDir -> {
-                        Path modSourcePath = moduleDir.resolve(sourceDir);
-                        if (Files.isDirectory(modSourcePath)) {
-                            collectJavaFiles(modSourcePath, files);
-                        }
-                    });
-            } catch (IOException e) {
-                log.warn("Error collecting source files", e);
+            SourceFileScanner.collectSourceFiles(projectDir, List.of(sourceDir));
+        }
+        // Actually let's just use fqnsUnder for all source paths
+        for (String sourceDir : config.sourceDirs()) {
+            Path sourcePath = projectDir.resolve(sourceDir);
+            if (Files.isDirectory(sourcePath)) {
+                fqns.addAll(SourceFileScanner.fqnsUnder(sourcePath));
             }
         }
-        return files;
-    }
-
-    private void collectJavaFiles(Path dir, List<Path> result) {
-        try {
-            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (file.toString().endsWith(".java")) {
-                        result.add(file);
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-        } catch (IOException e) {
-            log.warn("Error collecting Java files from {}", dir, e);
-        }
+        return fqns;
     }
 
     private String extractFqn(CompilationUnit cu, ClassOrInterfaceDeclaration decl) {
@@ -231,10 +168,5 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                 .orElse("");
         String name = decl.getNameAsString();
         return pkg.isEmpty() ? name : pkg + "." + name;
-    }
-
-    private static String simpleClassName(String fqn) {
-        int dot = fqn.lastIndexOf('.');
-        return dot >= 0 ? fqn.substring(dot + 1) : fqn;
     }
 }

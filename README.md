@@ -11,7 +11,7 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '1.3.0'
+    id 'io.affectedtests' version '1.4.0'
 }
 ```
 
@@ -141,7 +141,8 @@ When a class in `:api` changes, the plugin will search for affected tests in bot
 |----------|-----------------|
 | No changed Java files | Exit 0, skip tests |
 | No matching tests found | Exit 0 (or run full suite if `runAllIfNoMatches = true`) |
-| Git not available | Clear error message |
+| Base ref not found | **Fails with clear error** (prevents silent test skipping in CI) |
+| Git not available | **Fails with clear error** |
 
 ## Project Structure
 

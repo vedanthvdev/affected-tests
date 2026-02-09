@@ -78,4 +78,19 @@ class PathToClassMapperTest {
         assertEquals("application", mapper.extractModule("application/src/test/java/com/example/FooTest.java"));
         assertEquals("", mapper.extractModule("src/main/java/com/example/Foo.java"));
     }
+
+    @Test
+    void extractModuleDoesNotMatchSubstring() {
+        // "someapi" should not be mis-parsed when the source dir is "src/main/java"
+        // and the module name happens to contain a source dir prefix.
+        assertEquals("someapi", mapper.extractModule("someapi/src/main/java/com/example/Foo.java"));
+        assertEquals("my-api", mapper.extractModule("my-api/src/main/java/com/example/Foo.java"));
+        assertEquals("api-gateway", mapper.extractModule("api-gateway/src/main/java/com/example/Foo.java"));
+    }
+
+    @Test
+    void extractModuleHandlesNestedPaths() {
+        assertEquals("services/payment-api",
+                mapper.extractModule("services/payment-api/src/main/java/com/example/Foo.java"));
+    }
 }

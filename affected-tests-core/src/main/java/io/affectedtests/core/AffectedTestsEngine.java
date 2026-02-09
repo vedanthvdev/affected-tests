@@ -166,7 +166,14 @@ public final class AffectedTestsEngine {
             if (targetModule != null) {
                 // Strip leading ":" from target module name
                 String targetDir = targetModule.startsWith(":") ? targetModule.substring(1) : targetModule;
-                Path targetPath = projectDir.resolve(targetDir);
+
+                // Validate that the resolved path stays within the project directory
+                Path targetPath = projectDir.resolve(targetDir).normalize();
+                if (!targetPath.startsWith(projectDir)) {
+                    log.error("Rejecting testProjectMapping target '{}' — resolves outside the project directory.", targetDir);
+                    continue;
+                }
+
                 if (Files.isDirectory(targetPath)) {
                     dirs.add(targetPath);
                     log.info("Cross-module mapping: {} -> {} ({})", changedModule, targetModule, targetPath);
