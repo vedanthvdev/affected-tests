@@ -243,4 +243,64 @@ class UsageStrategyTest {
         assertTrue(result.contains("com.example.tests.OverseasPaymentDetailValidatorTest"),
                 "Should find test in sub-module that imports the changed class");
     }
+
+    @Test
+    void findsTestInDeeplyNestedModule() throws IOException {
+        // Depth 2: services/payment/src/test/java/...
+        Path deepTestDir = tempDir.resolve("services/payment/src/test/java/com/example");
+        Files.createDirectories(deepTestDir);
+        Files.writeString(deepTestDir.resolve("PaymentGatewayIT.java"), """
+                package com.example;
+
+                import com.example.service.PaymentGateway;
+
+                public class PaymentGatewayIT {
+                    private PaymentGateway gateway;
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.PaymentGateway"), tempDir);
+
+        assertTrue(result.contains("com.example.PaymentGatewayIT"),
+                "Should find test nested 2 levels deep: services/payment/src/test/java");
+    }
+
+    @Test
+    void findsTestsAcrossMultipleDepths() throws IOException {
+        // Depth 1
+        Path apiTestDir = tempDir.resolve("api/src/test/java/com/example");
+        Files.createDirectories(apiTestDir);
+        Files.writeString(apiTestDir.resolve("ShallowTest.java"), """
+                package com.example;
+
+                import com.example.service.UserService;
+
+                public class ShallowTest {
+                    private UserService svc;
+                }
+                """);
+
+        // Depth 3
+        Path deepTestDir = tempDir.resolve("platform/services/user/src/test/java/com/example");
+        Files.createDirectories(deepTestDir);
+        Files.writeString(deepTestDir.resolve("DeepTest.java"), """
+                package com.example;
+
+                import com.example.service.UserService;
+
+                public class DeepTest {
+                    private UserService svc;
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.UserService"), tempDir);
+
+        assertTrue(result.contains("com.example.ShallowTest"),
+                "Should find test at depth 1");
+        assertTrue(result.contains("com.example.DeepTest"),
+                "Should find test at depth 3");
+        assertEquals(2, result.size());
+    }
 }

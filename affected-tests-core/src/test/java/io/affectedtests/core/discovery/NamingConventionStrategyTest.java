@@ -90,4 +90,48 @@ class NamingConventionStrategyTest {
 
         assertTrue(result.contains("com.example.UserServiceTest"));
     }
+
+    @Test
+    void findsTestsInDeeplyNestedModules() throws IOException {
+        // Depth 2: services/payment/src/test/java/...
+        Path deepTestDir = tempDir.resolve("services/payment/src/test/java/com/example");
+        Files.createDirectories(deepTestDir);
+        Files.writeString(deepTestDir.resolve("PaymentServiceTest.java"),
+                "package com.example;\npublic class PaymentServiceTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.PaymentService"), tempDir);
+
+        assertTrue(result.contains("com.example.PaymentServiceTest"),
+                "Should find test nested 2 levels deep: services/payment/src/test/java");
+    }
+
+    @Test
+    void findsTestsAcrossMultipleNestedModules() throws IOException {
+        // Root level
+        Path rootTestDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(rootTestDir);
+        Files.writeString(rootTestDir.resolve("OrderServiceTest.java"),
+                "package com.example;\npublic class OrderServiceTest {}");
+
+        // Depth 1
+        Path apiTestDir = tempDir.resolve("api/src/test/java/com/example");
+        Files.createDirectories(apiTestDir);
+        Files.writeString(apiTestDir.resolve("OrderServiceIT.java"),
+                "package com.example;\npublic class OrderServiceIT {}");
+
+        // Depth 2
+        Path deepTestDir = tempDir.resolve("services/order/src/test/java/com/example");
+        Files.createDirectories(deepTestDir);
+        Files.writeString(deepTestDir.resolve("OrderServiceIntegrationTest.java"),
+                "package com.example;\npublic class OrderServiceIntegrationTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.OrderService"), tempDir);
+
+        assertEquals(3, result.size(), "Should find tests at root, depth 1, and depth 2");
+        assertTrue(result.contains("com.example.OrderServiceTest"));
+        assertTrue(result.contains("com.example.OrderServiceIT"));
+        assertTrue(result.contains("com.example.OrderServiceIntegrationTest"));
+    }
 }

@@ -15,6 +15,16 @@ import java.util.*;
 /**
  * Main orchestrator: detects changes, maps them to classes, discovers affected tests.
  *
+ * <p>Pipeline:
+ * <ol>
+ *   <li>Detect changed files via JGit ({@code baseRef..HEAD} + uncommitted/staged)</li>
+ *   <li>Map file paths to production and test class FQNs</li>
+ *   <li>Run all enabled discovery strategies (naming, usage, impl, transitive)
+ *       and merge their results. Scanning is recursive — modules at any nesting
+ *       depth are discovered automatically.</li>
+ *   <li>Return the union of all discovered test FQNs for execution</li>
+ * </ol>
+ *
  * <p>Usage:
  * <pre>{@code
  * AffectedTestsConfig config = AffectedTestsConfig.builder().build();

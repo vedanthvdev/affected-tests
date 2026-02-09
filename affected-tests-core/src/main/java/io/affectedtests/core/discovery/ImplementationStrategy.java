@@ -9,7 +9,6 @@ import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -140,23 +139,15 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
     }
 
     /**
-     * Collects FQNs for all source files under project dir (used for naming-convention matching).
+     * Collects FQNs for all source files under the project dir at any depth.
+     * Delegates to {@link SourceFileScanner#findAllMatchingDirs} so nested
+     * modules like {@code services/payment/src/main/java} are included.
      */
     private Set<String> collectSourceFqns(Path projectDir) {
         Set<String> fqns = new LinkedHashSet<>();
         for (String sourceDir : config.sourceDirs()) {
-            Path sourcePath = projectDir.resolve(sourceDir);
-            if (Files.isDirectory(sourcePath)) {
-                fqns.addAll(SourceFileScanner.fqnsUnder(sourcePath));
-            }
-            // sub-modules
-            SourceFileScanner.collectSourceFiles(projectDir, List.of(sourceDir));
-        }
-        // Actually let's just use fqnsUnder for all source paths
-        for (String sourceDir : config.sourceDirs()) {
-            Path sourcePath = projectDir.resolve(sourceDir);
-            if (Files.isDirectory(sourcePath)) {
-                fqns.addAll(SourceFileScanner.fqnsUnder(sourcePath));
+            for (Path resolved : SourceFileScanner.findAllMatchingDirs(projectDir, sourceDir)) {
+                fqns.addAll(SourceFileScanner.fqnsUnder(resolved));
             }
         }
         return fqns;
