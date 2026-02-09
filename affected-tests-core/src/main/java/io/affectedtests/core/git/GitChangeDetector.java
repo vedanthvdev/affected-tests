@@ -62,7 +62,11 @@ public final class GitChangeDetector {
             }
 
         } catch (Exception e) {
-            log.error("Failed to detect git changes. Falling back to empty change set.", e);
+            log.error("Failed to detect git changes: {}", e.getMessage());
+            throw new IllegalStateException(
+                    "Affected Tests: unable to detect git changes. "
+                    + "Verify the repository exists and the base ref '" + config.baseRef() + "' is valid.",
+                    e);
         }
 
         log.info("Detected {} changed files", changedFiles.size());
@@ -81,8 +85,9 @@ public final class GitChangeDetector {
 
         ObjectId baseId = resolveBaseRef(repository);
         if (baseId == null) {
-            log.warn("Base ref '{}' not found. Treating all files as changed.", config.baseRef());
-            return files;
+            throw new IllegalStateException(
+                    "Base ref '" + config.baseRef() + "' could not be resolved. "
+                    + "Ensure the ref exists (e.g. run 'git fetch origin' in CI).");
         }
 
         AbstractTreeIterator baseTree = prepareTreeParser(repository, baseId);

@@ -10,9 +10,7 @@ import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -56,8 +54,8 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         Set<String> currentLevel = new LinkedHashSet<>(changedProductionClasses);
         Set<String> allVisited = new LinkedHashSet<>(changedProductionClasses);
 
-        // Pre-index: map FQN → set of FQNs it depends on (field types)
-        Map<String, Set<String>> dependencyMap = buildDependencyMap(projectDir);
+        // Pre-index: reverse map — FQN → set of FQNs that depend on it
+        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(projectDir);
 
         for (int depth = 1; depth <= config.transitiveDepth(); depth++) {
             Set<String> nextLevel = new LinkedHashSet<>();
@@ -92,38 +90,34 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
     }
 
     /**
-     * Builds a map of class FQN → set of FQNs it depends on (based on field types
-     * resolved via imports). This scans all production source files.
+     * Builds a <em>reverse</em> dependency map: for each production class FQN,
+     * lists the FQNs of other production classes that <strong>depend on</strong> it
+     * (i.e. have it as a field type). This is the "usedBy" direction, so when a
+     * class changes we can find all classes that consume it.
      */
-    private Map<String, Set<String>> buildDependencyMap(Path projectDir) {
-        Map<String, Set<String>> map = new HashMap<>();
-        List<Path> sourceFiles = collectSourceFiles(projectDir);
+    private Map<String, Set<String>> buildReverseDependencyMap(Path projectDir) {
+        Map<String, Set<String>> reverseMap = new HashMap<>();
+        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
         JavaParser parser = new JavaParser();
 
         // First pass: collect all known FQNs so we can resolve simple names
         Set<String> allKnownFqns = new HashSet<>();
-        Map<String, Set<String>> simpleNameToFqns = new HashMap<>();
-
         for (Path file : sourceFiles) {
-            String fqn = pathToFqn(file, projectDir);
+            String fqn = pathToFqn(file);
             if (fqn != null) {
                 allKnownFqns.add(fqn);
-                String simple = simpleClassName(fqn);
-                simpleNameToFqns.computeIfAbsent(simple, k -> new HashSet<>()).add(fqn);
             }
         }
 
-        // Second pass: for each source file, find field types and resolve to FQNs
+        // Second pass: for each source file, find field types and build reverse edges
         for (Path file : sourceFiles) {
             try {
                 ParseResult<CompilationUnit> result = parser.parse(file);
                 if (!result.isSuccessful() || result.getResult().isEmpty()) continue;
 
                 CompilationUnit cu = result.getResult().get();
-                String classFqn = pathToFqn(file, projectDir);
+                String classFqn = pathToFqn(file);
                 if (classFqn == null) continue;
-
-                Set<String> deps = new LinkedHashSet<>();
 
                 // Build import map
                 Map<String, String> importMap = new HashMap<>();
@@ -133,7 +127,7 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                         wildcardPackages.add(imp.getNameAsString());
                     } else {
                         String impFqn = imp.getNameAsString();
-                        importMap.put(simpleClassName(impFqn), impFqn);
+                        importMap.put(SourceFileScanner.simpleClassName(impFqn), impFqn);
                     }
                 }
 
@@ -153,7 +147,6 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                         // Resolve to FQN
                         String resolvedFqn = importMap.get(typeName);
                         if (resolvedFqn == null) {
-                            // Check same package
                             String candidate = currentPackage.isEmpty()
                                     ? typeName : currentPackage + "." + typeName;
                             if (allKnownFqns.contains(candidate)) {
@@ -161,7 +154,6 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                             }
                         }
                         if (resolvedFqn == null) {
-                            // Check wildcard imports
                             for (String pkg : wildcardPackages) {
                                 String candidate = pkg + "." + typeName;
                                 if (allKnownFqns.contains(candidate)) {
@@ -171,26 +163,24 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                             }
                         }
 
+                        // Reverse edge: resolvedFqn is used by classFqn
                         if (resolvedFqn != null && allKnownFqns.contains(resolvedFqn)
                                 && !resolvedFqn.equals(classFqn)) {
-                            deps.add(resolvedFqn);
+                            reverseMap.computeIfAbsent(resolvedFqn, k -> new LinkedHashSet<>())
+                                    .add(classFqn);
                         }
                     }
-                }
-
-                if (!deps.isEmpty()) {
-                    map.put(classFqn, deps);
                 }
             } catch (Exception e) {
                 log.debug("Error parsing {} for dependency map: {}", file, e.getMessage());
             }
         }
 
-        log.debug("[transitive] Built dependency map with {} entries", map.size());
-        return map;
+        log.debug("[transitive] Built reverse dependency map with {} entries", reverseMap.size());
+        return reverseMap;
     }
 
-    private String pathToFqn(Path file, Path projectDir) {
+    private String pathToFqn(Path file) {
         String filePath = file.toString().replace(java.io.File.separatorChar, '/');
         for (String sourceDir : config.sourceDirs()) {
             String normalizedDir = sourceDir.replace('\\', '/');
@@ -206,49 +196,5 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
             }
         }
         return null;
-    }
-
-    private List<Path> collectSourceFiles(Path projectDir) {
-        List<Path> files = new ArrayList<>();
-        for (String sourceDir : config.sourceDirs()) {
-            Path sourcePath = projectDir.resolve(sourceDir);
-            if (Files.isDirectory(sourcePath)) {
-                collectJavaFiles(sourcePath, files);
-            }
-            try (var dirs = Files.walk(projectDir, 1)) {
-                dirs.filter(Files::isDirectory)
-                    .filter(d -> !d.equals(projectDir))
-                    .forEach(moduleDir -> {
-                        Path modSourcePath = moduleDir.resolve(sourceDir);
-                        if (Files.isDirectory(modSourcePath)) {
-                            collectJavaFiles(modSourcePath, files);
-                        }
-                    });
-            } catch (IOException e) {
-                log.warn("Error collecting source files", e);
-            }
-        }
-        return files;
-    }
-
-    private void collectJavaFiles(Path dir, List<Path> result) {
-        try {
-            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (file.toString().endsWith(".java")) {
-                        result.add(file);
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-        } catch (IOException e) {
-            log.warn("Error collecting Java files from {}", dir, e);
-        }
-    }
-
-    private static String simpleClassName(String fqn) {
-        int dot = fqn.lastIndexOf('.');
-        return dot >= 0 ? fqn.substring(dot + 1) : fqn;
     }
 }

@@ -4,6 +4,7 @@ import io.affectedtests.core.AffectedTestsEngine;
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.gradle.api.DefaultTask;
+import org.gradle.api.GradleException;
 import org.gradle.api.file.DirectoryProperty;
 import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.MapProperty;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Gradle task that detects affected tests and executes them.
@@ -203,21 +205,18 @@ public abstract class AffectedTestTask extends DefaultTask {
         executeTests(projectDir, result.testClassFqns(), result.runAll());
     }
 
+    private static final Pattern VALID_FQN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.$]*$");
+
     private void executeTests(Path projectDir, Set<String> testFqns, boolean runAll) {
-        File gradlew = projectDir.resolve(isWindows() ? "gradlew.bat" : "gradlew").toFile();
-        if (!gradlew.exists() || !gradlew.canExecute()) {
-            getLogger().warn("Gradle wrapper not found at {}. Falling back to 'gradle' command.", gradlew);
-            gradlew = new File("gradle");
-        }
+        String gradleCommand = resolveGradleCommand(projectDir);
 
         List<String> args = new ArrayList<>();
-        args.add(gradlew.getAbsolutePath());
+        args.add(gradleCommand);
         args.add("test");
 
         if (!runAll && !testFqns.isEmpty()) {
-            java.util.regex.Pattern validFqn = java.util.regex.Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.\\$]*$");
             for (String fqn : testFqns) {
-                if (!validFqn.matcher(fqn).matches()) {
+                if (!VALID_FQN.matcher(fqn).matches()) {
                     getLogger().warn("Skipping invalid test FQN: {}", fqn);
                     continue;
                 }
@@ -243,8 +242,22 @@ public abstract class AffectedTestTask extends DefaultTask {
         });
 
         if (execResult.getExitValue() != 0) {
-            throw new RuntimeException("Test execution failed with exit code " + execResult.getExitValue());
+            throw new GradleException("Test execution failed with exit code " + execResult.getExitValue());
         }
+    }
+
+    /**
+     * Resolves the Gradle command to use. Prefers the wrapper in the project directory;
+     * falls back to the bare {@code "gradle"} command name so the OS PATH is used.
+     */
+    private static String resolveGradleCommand(Path projectDir) {
+        String wrapperName = isWindows() ? "gradlew.bat" : "gradlew";
+        File gradlew = projectDir.resolve(wrapperName).toFile();
+        if (gradlew.exists() && gradlew.canExecute()) {
+            return gradlew.getAbsolutePath();
+        }
+        // Return bare command name — let the OS resolve it via PATH
+        return wrapperName.replace(".bat", "");
     }
 
     private static boolean isWindows() {

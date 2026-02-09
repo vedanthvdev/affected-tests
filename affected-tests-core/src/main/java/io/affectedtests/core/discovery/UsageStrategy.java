@@ -14,9 +14,7 @@ import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Path;
 import java.util.*;
 
 /**
@@ -71,13 +69,13 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         Set<String> changedFqns = new HashSet<>(changedProductionClasses);
         Set<String> simpleNames = new HashSet<>();
         for (String fqn : changedProductionClasses) {
-            String simpleName = simpleClassName(fqn);
+            String simpleName = SourceFileScanner.simpleClassName(fqn);
             simpleNameToFqn.put(simpleName, fqn);
             simpleNames.add(simpleName);
         }
 
         // Scan all test files
-        List<Path> testFiles = collectTestFiles(projectDir);
+        List<Path> testFiles = SourceFileScanner.collectTestFiles(projectDir, config.testDirs());
         JavaParser parser = new JavaParser();
 
         for (Path testFile : testFiles) {
@@ -89,7 +87,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
                 }
 
                 CompilationUnit cu = result.getResult().get();
-                String testFqn = extractFqn(cu, testFile, projectDir);
+                String testFqn = extractFqn(cu, testFile);
                 if (testFqn == null) continue;
 
                 // Skip if this test class IS one of the changed production classes
@@ -129,8 +127,6 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         }
 
         // --- Tier 1: Direct import match ---
-        // If the test directly imports the changed class FQN, it's affected.
-        // This catches ALL usage patterns (fields, params, locals, casts, generics, etc.)
         for (String changedFqn : changedFqns) {
             if (importedFqns.contains(changedFqn)) {
                 log.debug("  Direct import match: {}", changedFqn);
@@ -139,11 +135,10 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         }
 
         // --- Tier 1b: Wildcard import match ---
-        // If a wildcard import covers the changed class's package, check type references
         for (String changedFqn : changedFqns) {
-            String pkg = packageOf(changedFqn);
+            String pkg = SourceFileScanner.packageOf(changedFqn);
             if (wildcardPackages.contains(pkg)) {
-                String simpleName = simpleClassName(changedFqn);
+                String simpleName = SourceFileScanner.simpleClassName(changedFqn);
                 if (typeNameAppearsInAst(cu, simpleName)) {
                     log.debug("  Wildcard import + type ref match: {}", changedFqn);
                     return true;
@@ -156,9 +151,9 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
         for (String changedFqn : changedFqns) {
-            String changedPkg = packageOf(changedFqn);
+            String changedPkg = SourceFileScanner.packageOf(changedFqn);
             if (testPackage.equals(changedPkg)) {
-                String simpleName = simpleClassName(changedFqn);
+                String simpleName = SourceFileScanner.simpleClassName(changedFqn);
                 if (typeNameAppearsInAst(cu, simpleName)) {
                     log.debug("  Same-package type ref match: {}", changedFqn);
                     return true;
@@ -207,16 +202,12 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
      * Matches a type string against a simple name, handling generics.
      */
     private boolean typeMatches(String typeString, String simpleName) {
-        // Strip generics: "List<FooBar>" -> "List", but also check inside generics
         if (typeString.equals(simpleName)) return true;
-        if (typeString.contains(simpleName)) {
-            // Could be in generics like "List<FooBar>" or "Map<String, FooBar>"
-            return true;
-        }
-        return false;
+        // Could be in generics like "List<FooBar>" or "Map<String, FooBar>"
+        return typeString.contains(simpleName);
     }
 
-    private String extractFqn(CompilationUnit cu, Path testFile, Path projectDir) {
+    private String extractFqn(CompilationUnit cu, Path testFile) {
         // Try to derive FQN from the test directory structure
         for (String testDir : config.testDirs()) {
             Path testRoot = findTestRoot(testFile, testDir);
@@ -251,57 +242,5 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             current = current.getParent();
         }
         return null;
-    }
-
-    private List<Path> collectTestFiles(Path projectDir) {
-        List<Path> testFiles = new ArrayList<>();
-        for (String testDir : config.testDirs()) {
-            // Direct test path
-            Path testPath = projectDir.resolve(testDir);
-            if (Files.isDirectory(testPath)) {
-                collectJavaFiles(testPath, testFiles);
-            }
-
-            // Also check sub-modules
-            try (var dirs = Files.walk(projectDir, 1)) {
-                dirs.filter(Files::isDirectory)
-                    .filter(d -> !d.equals(projectDir))
-                    .forEach(moduleDir -> {
-                        Path modulTestPath = moduleDir.resolve(testDir);
-                        if (Files.isDirectory(modulTestPath)) {
-                            collectJavaFiles(modulTestPath, testFiles);
-                        }
-                    });
-            } catch (IOException e) {
-                log.warn("Error scanning for test files under {}", projectDir, e);
-            }
-        }
-        return testFiles;
-    }
-
-    private void collectJavaFiles(Path dir, List<Path> result) {
-        try {
-            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (file.toString().endsWith(".java")) {
-                        result.add(file);
-                    }
-                    return FileVisitResult.CONTINUE;
-                }
-            });
-        } catch (IOException e) {
-            log.warn("Error collecting Java files from {}", dir, e);
-        }
-    }
-
-    static String simpleClassName(String fqn) {
-        int dot = fqn.lastIndexOf('.');
-        return dot >= 0 ? fqn.substring(dot + 1) : fqn;
-    }
-
-    static String packageOf(String fqn) {
-        int dot = fqn.lastIndexOf('.');
-        return dot >= 0 ? fqn.substring(0, dot) : "";
     }
 }
