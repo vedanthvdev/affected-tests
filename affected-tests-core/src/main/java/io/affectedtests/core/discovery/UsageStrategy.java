@@ -5,7 +5,11 @@ import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.VariableDeclarator;
+import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,15 +21,26 @@ import java.util.*;
 
 /**
  * Strategy: Usage / Reference scanning.
- * <p>
- * Scans test source files for field declarations whose type matches a changed
- * production class. Uses JavaParser to resolve imports and match types accurately.
- * <p>
- * Examples it catches:
+ *
+ * <p>Scans test source files for references to changed production classes.
+ * Uses a two-tier approach:
+ * <ol>
+ *   <li><strong>Import matching (primary):</strong> If a test file directly imports the
+ *       changed class FQN, it is considered affected. This catches all usage patterns:
+ *       fields, method parameters, local variables, constructor args, type casts, etc.</li>
+ *   <li><strong>Type reference scanning (secondary):</strong> For same-package and wildcard
+ *       import cases, scans for the simple name in field declarations, method parameters,
+ *       constructor instantiations, and type references.</li>
+ * </ol>
+ *
+ * <p>Examples it catches:
  * <ul>
+ *   <li>{@code import com.example.PaymentDetails;} (any usage in the file)</li>
  *   <li>{@code private FooBar underTest;}</li>
  *   <li>{@code @Autowired private FooBar fooBar;}</li>
  *   <li>{@code @Mock private FooBar fooBar;}</li>
+ *   <li>{@code public void test(FooBar param) {...}}</li>
+ *   <li>{@code new FooBar(...)}</li>
  * </ul>
  */
 public final class UsageStrategy implements TestDiscoveryStrategy {
@@ -47,8 +62,13 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
         Set<String> discoveredTests = new LinkedHashSet<>();
 
+        if (changedProductionClasses.isEmpty()) {
+            return discoveredTests;
+        }
+
         // Build lookup structures
         Map<String, String> simpleNameToFqn = new HashMap<>();
+        Set<String> changedFqns = new HashSet<>(changedProductionClasses);
         Set<String> simpleNames = new HashSet<>();
         for (String fqn : changedProductionClasses) {
             String simpleName = simpleClassName(fqn);
@@ -72,38 +92,12 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
                 String testFqn = extractFqn(cu, testFile, projectDir);
                 if (testFqn == null) continue;
 
-                // Get imports to resolve types
-                Set<String> importedFqns = new HashSet<>();
-                Set<String> wildcardPackages = new HashSet<>();
-                for (ImportDeclaration imp : cu.getImports()) {
-                    if (imp.isAsterisk()) {
-                        wildcardPackages.add(imp.getNameAsString());
-                    } else {
-                        importedFqns.add(imp.getNameAsString());
-                    }
-                }
+                // Skip if this test class IS one of the changed production classes
+                if (changedFqns.contains(testFqn)) continue;
 
-                // Check field declarations for production class references
-                List<FieldDeclaration> fields = cu.findAll(FieldDeclaration.class);
-                for (FieldDeclaration field : fields) {
-                    for (VariableDeclarator var : field.getVariables()) {
-                        String typeName = var.getTypeAsString();
-                        // Remove generics (e.g. List<FooBar> → List)
-                        if (typeName.contains("<")) {
-                            typeName = typeName.substring(0, typeName.indexOf('<'));
-                        }
-
-                        if (simpleNames.contains(typeName)) {
-                            // Verify via imports that this refers to the changed class
-                            String expectedFqn = simpleNameToFqn.get(typeName);
-                            if (isImported(expectedFqn, typeName, importedFqns, wildcardPackages, cu)) {
-                                discoveredTests.add(testFqn);
-                                log.debug("Usage match: {} uses {} (field: {})",
-                                        testFqn, expectedFqn, var.getNameAsString());
-                                break; // found a match, no need to check more fields
-                            }
-                        }
-                    }
+                if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqn)) {
+                    discoveredTests.add(testFqn);
+                    log.debug("Usage match: {}", testFqn);
                 }
             } catch (Exception e) {
                 log.debug("Error parsing test file {}: {}", testFile, e.getMessage());
@@ -115,33 +109,111 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         return discoveredTests;
     }
 
-    private boolean isImported(String expectedFqn, String simpleName,
-                               Set<String> importedFqns, Set<String> wildcardPackages,
-                               CompilationUnit cu) {
-        // Direct import match
-        if (importedFqns.contains(expectedFqn)) {
-            return true;
+    /**
+     * Checks whether a test compilation unit references any of the changed classes.
+     * Uses a two-tier approach: direct import match first, then type reference scanning.
+     */
+    private boolean testReferencesChangedClass(CompilationUnit cu,
+                                               Set<String> changedFqns,
+                                               Set<String> simpleNames,
+                                               Map<String, String> simpleNameToFqn) {
+        // Collect imports
+        Set<String> importedFqns = new HashSet<>();
+        Set<String> wildcardPackages = new HashSet<>();
+        for (ImportDeclaration imp : cu.getImports()) {
+            if (imp.isAsterisk()) {
+                wildcardPackages.add(imp.getNameAsString());
+            } else {
+                importedFqns.add(imp.getNameAsString());
+            }
         }
 
-        // Wildcard import from same package
-        String expectedPackage = packageOf(expectedFqn);
-        if (wildcardPackages.contains(expectedPackage)) {
-            return true;
+        // --- Tier 1: Direct import match ---
+        // If the test directly imports the changed class FQN, it's affected.
+        // This catches ALL usage patterns (fields, params, locals, casts, generics, etc.)
+        for (String changedFqn : changedFqns) {
+            if (importedFqns.contains(changedFqn)) {
+                log.debug("  Direct import match: {}", changedFqn);
+                return true;
+            }
         }
 
-        // Same package (no import needed)
+        // --- Tier 1b: Wildcard import match ---
+        // If a wildcard import covers the changed class's package, check type references
+        for (String changedFqn : changedFqns) {
+            String pkg = packageOf(changedFqn);
+            if (wildcardPackages.contains(pkg)) {
+                String simpleName = simpleClassName(changedFqn);
+                if (typeNameAppearsInAst(cu, simpleName)) {
+                    log.debug("  Wildcard import + type ref match: {}", changedFqn);
+                    return true;
+                }
+            }
+        }
+
+        // --- Tier 2: Same-package (no import needed) ---
         String testPackage = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
-        if (testPackage.equals(expectedPackage)) {
-            return true;
+        for (String changedFqn : changedFqns) {
+            String changedPkg = packageOf(changedFqn);
+            if (testPackage.equals(changedPkg)) {
+                String simpleName = simpleClassName(changedFqn);
+                if (typeNameAppearsInAst(cu, simpleName)) {
+                    log.debug("  Same-package type ref match: {}", changedFqn);
+                    return true;
+                }
+            }
         }
 
-        // Fallback: if no other class with the same simple name is imported,
-        // assume it's our class (handles cases where IDE auto-imports)
-        boolean anotherClassWithSameName = importedFqns.stream()
-                .anyMatch(imp -> imp.endsWith("." + simpleName) && !imp.equals(expectedFqn));
-        return !anotherClassWithSameName;
+        return false;
+    }
+
+    /**
+     * Checks whether the given simple type name appears in the AST as a type reference.
+     * Scans fields, method parameters, constructor instantiations, and all type references.
+     */
+    private boolean typeNameAppearsInAst(CompilationUnit cu, String simpleName) {
+        // Check field declarations
+        for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
+            for (VariableDeclarator var : field.getVariables()) {
+                if (typeMatches(var.getTypeAsString(), simpleName)) return true;
+            }
+        }
+
+        // Check method parameters
+        for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
+            for (Parameter param : method.getParameters()) {
+                if (typeMatches(param.getTypeAsString(), simpleName)) return true;
+            }
+            // Check return type
+            if (typeMatches(method.getTypeAsString(), simpleName)) return true;
+        }
+
+        // Check constructor calls: new FooBar(...)
+        for (ObjectCreationExpr expr : cu.findAll(ObjectCreationExpr.class)) {
+            if (typeMatches(expr.getTypeAsString(), simpleName)) return true;
+        }
+
+        // Check all ClassOrInterfaceType nodes (catches generics, casts, etc.)
+        for (ClassOrInterfaceType type : cu.findAll(ClassOrInterfaceType.class)) {
+            if (type.getNameAsString().equals(simpleName)) return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Matches a type string against a simple name, handling generics.
+     */
+    private boolean typeMatches(String typeString, String simpleName) {
+        // Strip generics: "List<FooBar>" -> "List", but also check inside generics
+        if (typeString.equals(simpleName)) return true;
+        if (typeString.contains(simpleName)) {
+            // Could be in generics like "List<FooBar>" or "Map<String, FooBar>"
+            return true;
+        }
+        return false;
     }
 
     private String extractFqn(CompilationUnit cu, Path testFile, Path projectDir) {
@@ -223,12 +295,12 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         }
     }
 
-    private static String simpleClassName(String fqn) {
+    static String simpleClassName(String fqn) {
         int dot = fqn.lastIndexOf('.');
         return dot >= 0 ? fqn.substring(dot + 1) : fqn;
     }
 
-    private static String packageOf(String fqn) {
+    static String packageOf(String fqn) {
         int dot = fqn.lastIndexOf('.');
         return dot >= 0 ? fqn.substring(0, dot) : "";
     }

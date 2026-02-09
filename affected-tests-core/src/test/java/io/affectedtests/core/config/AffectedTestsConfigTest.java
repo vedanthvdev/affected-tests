@@ -72,6 +72,32 @@ class AffectedTestsConfigTest {
     }
 
     @Test
+    void baseRefRejectsBlank() {
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("").build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("   ").build());
+    }
+
+    @Test
+    void baseRefRejectsPathTraversal() {
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("../../etc/passwd").build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("refs/../../../secrets").build());
+    }
+
+    @Test
+    void baseRefAllowsValidRefs() {
+        // These should all be fine
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/master").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/main").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("abc123def456").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("refs/heads/feature-branch").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("HEAD~3").build());
+    }
+
+    @Test
     void configIsImmutable() {
         AffectedTestsConfig config = AffectedTestsConfig.builder().build();
 
