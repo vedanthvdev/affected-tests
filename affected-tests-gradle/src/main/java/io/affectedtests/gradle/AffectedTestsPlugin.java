@@ -4,13 +4,13 @@ import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 /**
  * Gradle plugin that registers the {@code affectedTest} task and the
  * {@code affectedTests} DSL extension.
- * <p>
- * Plugin ID: {@code io.affectedtests}
+ *
+ * <p>Plugin ID: {@code io.affectedtests}
  */
 public class AffectedTestsPlugin implements Plugin<Project> {
 
@@ -20,7 +20,7 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         AffectedTestsExtension extension = project.getExtensions()
                 .create("affectedTests", AffectedTestsExtension.class);
 
-        // Set defaults
+        // Set conventions (defaults) — these use the Provider API so they're lazy
         extension.getBaseRef().convention(
                 project.getProviders().gradleProperty("affectedTestsBaseRef")
                         .orElse("origin/master")
@@ -36,14 +36,14 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         extension.getExcludePaths().convention(List.of("**/generated/**"));
         extension.getIncludeImplementationTests().convention(true);
         extension.getImplementationNaming().convention(List.of("Impl"));
-        extension.getTestProjectMapping().convention(java.util.Map.of());
+        extension.getTestProjectMapping().convention(Map.of());
 
-        // Register the affectedTest task
+        // Register the affectedTest task lazily
         project.getTasks().register("affectedTest", AffectedTestTask.class, task -> {
             task.setGroup("verification");
             task.setDescription("Runs only the tests affected by changes in the current branch.");
 
-            // Wire extension properties to task properties
+            // Wire extension properties to task inputs
             task.getBaseRef().set(extension.getBaseRef());
             task.getIncludeUncommitted().set(extension.getIncludeUncommitted());
             task.getIncludeStaged().set(extension.getIncludeStaged());
@@ -57,6 +57,9 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getIncludeImplementationTests().set(extension.getIncludeImplementationTests());
             task.getImplementationNaming().set(extension.getImplementationNaming());
             task.getTestProjectMapping().set(extension.getTestProjectMapping());
+
+            // Wire rootDir at configuration time (safe for config cache)
+            task.getRootDir().set(project.getRootProject().getLayout().getProjectDirectory());
         });
     }
 }
