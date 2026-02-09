@@ -11,11 +11,9 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
-import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
@@ -45,27 +43,24 @@ public final class GitChangeDetector {
     public Set<String> detectChangedFiles() {
         Set<String> changedFiles = new LinkedHashSet<>();
 
-        try {
-            Repository repository = new FileRepositoryBuilder()
+        try (Repository repository = new FileRepositoryBuilder()
                     .findGitDir(projectDir.toFile())
                     .build();
+             Git git = new Git(repository)) {
 
-            try (Git git = new Git(repository)) {
-                // 1. Committed changes: baseRef..HEAD
-                changedFiles.addAll(committedChanges(repository, git));
+            // 1. Committed changes: baseRef..HEAD
+            changedFiles.addAll(committedChanges(repository, git));
 
-                // 2. Uncommitted (unstaged) changes
-                if (config.includeUncommitted()) {
-                    changedFiles.addAll(uncommittedChanges(git));
-                }
-
-                // 3. Staged changes
-                if (config.includeStaged()) {
-                    changedFiles.addAll(stagedChanges(git));
-                }
+            // 2. Uncommitted (unstaged) changes
+            if (config.includeUncommitted()) {
+                changedFiles.addAll(uncommittedChanges(git));
             }
 
-            repository.close();
+            // 3. Staged changes
+            if (config.includeStaged()) {
+                changedFiles.addAll(stagedChanges(git));
+            }
+
         } catch (Exception e) {
             log.error("Failed to detect git changes. Falling back to empty change set.", e);
         }
