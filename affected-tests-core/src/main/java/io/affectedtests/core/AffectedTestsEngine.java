@@ -8,14 +8,14 @@ import io.affectedtests.core.mapping.PathToClassMapper.MappingResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.LinkedHashSet;
-import java.util.Set;
+import java.util.*;
 
 /**
  * Main orchestrator: detects changes, maps them to classes, discovers affected tests.
- * <p>
- * Usage:
+ *
+ * <p>Usage:
  * <pre>{@code
  * AffectedTestsConfig config = AffectedTestsConfig.builder().build();
  * AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
@@ -47,7 +47,7 @@ public final class AffectedTestsEngine {
     ) {}
 
     /**
-     * Runs the full pipeline: detect changes → map to classes → discover tests.
+     * Runs the full pipeline: detect changes, map to classes, discover tests.
      */
     public AffectedTestsResult run() {
         log.info("=== Affected Tests Analysis ===");
@@ -85,24 +85,25 @@ public final class AffectedTestsEngine {
 
         Set<String> productionClasses = mapping.productionClasses();
 
-        // Apply naming strategy
-        if (config.strategies().contains("naming")) {
-            allTestsToRun.addAll(namingStrategy.discoverTests(productionClasses, projectDir));
-        }
+        // Determine which directories to search for tests.
+        // Start with the root project dir, then add cross-module mapped dirs.
+        Set<Path> searchDirs = resolveTestSearchDirs(changedFiles, mapper);
+        log.info("Test search directories: {}", searchDirs);
 
-        // Apply usage strategy
-        if (config.strategies().contains("usage")) {
-            allTestsToRun.addAll(usageStrategy.discoverTests(productionClasses, projectDir));
-        }
-
-        // Apply implementation strategy
-        if (config.strategies().contains("impl")) {
-            allTestsToRun.addAll(implStrategy.discoverTests(productionClasses, projectDir));
-        }
-
-        // Apply transitive strategy (uses naming + usage internally)
-        if (config.transitiveDepth() > 0) {
-            allTestsToRun.addAll(transitiveStrategy.discoverTests(productionClasses, projectDir));
+        // Run strategies against each search directory
+        for (Path searchDir : searchDirs) {
+            if (config.strategies().contains("naming")) {
+                allTestsToRun.addAll(namingStrategy.discoverTests(productionClasses, searchDir));
+            }
+            if (config.strategies().contains("usage")) {
+                allTestsToRun.addAll(usageStrategy.discoverTests(productionClasses, searchDir));
+            }
+            if (config.strategies().contains("impl")) {
+                allTestsToRun.addAll(implStrategy.discoverTests(productionClasses, searchDir));
+            }
+            if (config.transitiveDepth() > 0) {
+                allTestsToRun.addAll(transitiveStrategy.discoverTests(productionClasses, searchDir));
+            }
         }
 
         // Handle no-match scenario
@@ -115,7 +116,7 @@ public final class AffectedTestsEngine {
         }
 
         log.info("=== Result: {} affected test classes ===", allTestsToRun.size());
-        allTestsToRun.forEach(t -> log.info("  → {}", t));
+        allTestsToRun.forEach(t -> log.info("  -> {}", t));
 
         return new AffectedTestsResult(
                 allTestsToRun,
@@ -124,5 +125,57 @@ public final class AffectedTestsEngine {
                 mapping.testClasses(),
                 runAll
         );
+    }
+
+    /**
+     * Resolves which directories to search for tests. Always includes the root project
+     * directory. When {@code testProjectMapping} is configured, also includes the
+     * mapped target module directories for any changed source modules.
+     *
+     * <p>For example, if a file in {@code api/src/main/java/...} changed and
+     * {@code testProjectMapping = {":api": ":application"}}, then the search dirs
+     * will include both the root project dir and {@code <root>/application/}.
+     */
+    private Set<Path> resolveTestSearchDirs(Set<String> changedFiles, PathToClassMapper mapper) {
+        Set<Path> dirs = new LinkedHashSet<>();
+
+        // Always search from project root (covers single-project and sub-module walks)
+        dirs.add(projectDir);
+
+        Map<String, String> mapping = config.testProjectMapping();
+        if (mapping.isEmpty()) {
+            return dirs;
+        }
+
+        // Determine which source modules had changes
+        Set<String> changedModules = new LinkedHashSet<>();
+        for (String file : changedFiles) {
+            String module = mapper.extractModule(file);
+            if (!module.isEmpty()) {
+                changedModules.add(module);
+            }
+        }
+
+        // Map source modules to test modules and add those directories
+        for (String changedModule : changedModules) {
+            // Try with and without the ":" prefix for flexibility
+            String targetModule = mapping.get(":" + changedModule);
+            if (targetModule == null) {
+                targetModule = mapping.get(changedModule);
+            }
+            if (targetModule != null) {
+                // Strip leading ":" from target module name
+                String targetDir = targetModule.startsWith(":") ? targetModule.substring(1) : targetModule;
+                Path targetPath = projectDir.resolve(targetDir);
+                if (Files.isDirectory(targetPath)) {
+                    dirs.add(targetPath);
+                    log.info("Cross-module mapping: {} -> {} ({})", changedModule, targetModule, targetPath);
+                } else {
+                    log.warn("Mapped test project directory does not exist: {}", targetPath);
+                }
+            }
+        }
+
+        return dirs;
     }
 }

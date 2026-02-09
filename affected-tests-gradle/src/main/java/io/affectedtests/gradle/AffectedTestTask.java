@@ -215,7 +215,12 @@ public abstract class AffectedTestTask extends DefaultTask {
         args.add("test");
 
         if (!runAll && !testFqns.isEmpty()) {
+            java.util.regex.Pattern validFqn = java.util.regex.Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.\\$]*$");
             for (String fqn : testFqns) {
+                if (!validFqn.matcher(fqn).matches()) {
+                    getLogger().warn("Skipping invalid test FQN: {}", fqn);
+                    continue;
+                }
                 args.add("--tests");
                 args.add(fqn);
             }

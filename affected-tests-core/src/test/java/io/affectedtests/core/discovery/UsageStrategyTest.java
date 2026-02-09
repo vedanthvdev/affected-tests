@@ -26,6 +26,27 @@ class UsageStrategyTest {
     }
 
     @Test
+    void findsTestThatImportsChangedClass() throws IOException {
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("OverseasValidatorTest.java"), """
+                package com.example;
+
+                import com.example.service.PaymentDetails;
+
+                public class OverseasValidatorTest {
+                    public void testValidate(PaymentDetails details) {}
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.OverseasValidatorTest"),
+                "Should match test that imports the changed class");
+    }
+
+    @Test
     void findsTestThatUsesChangedClassAsField() throws IOException {
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
@@ -90,6 +111,92 @@ class UsageStrategyTest {
     }
 
     @Test
+    void findsTestThatUsesChangedClassAsMethodParameter() throws IOException {
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("PaymentMapperTest.java"), """
+                package com.example;
+
+                import com.modulr.modulo.payment.services.PaymentDetails;
+
+                public class PaymentMapperTest {
+                    public void testMap(PaymentDetails details) {
+                        // uses PaymentDetails as method param only
+                    }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.modulr.modulo.payment.services.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.PaymentMapperTest"),
+                "Should match test that imports the changed class even without a field");
+    }
+
+    @Test
+    void findsTestThatUsesChangedClassInConstructorCall() throws IOException {
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("FactoryTest.java"), """
+                package com.example;
+
+                import com.example.service.PaymentDetails;
+
+                public class FactoryTest {
+                    public void testCreate() {
+                        PaymentDetails pd = new PaymentDetails();
+                    }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.FactoryTest"),
+                "Should match test that creates instances of the changed class");
+    }
+
+    @Test
+    void findsTestWithWildcardImportAndTypeReference() throws IOException {
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("WildcardTest.java"), """
+                package com.example;
+
+                import com.example.service.*;
+
+                public class WildcardTest {
+                    private PaymentDetails details;
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.WildcardTest"),
+                "Should match test with wildcard import covering the changed class's package");
+    }
+
+    @Test
+    void findsTestInSamePackageWithoutImport() throws IOException {
+        Path testDir = tempDir.resolve("src/test/java/com/example/service");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("InternalTest.java"), """
+                package com.example.service;
+
+                public class InternalTest {
+                    private PaymentDetails details;
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.service.InternalTest"),
+                "Should match test in same package (no import needed)");
+    }
+
+    @Test
     void doesNotMatchUnrelatedTypes() throws IOException {
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
@@ -113,5 +220,27 @@ class UsageStrategyTest {
     void returnsEmptyForEmptyInput() {
         Set<String> result = strategy.discoverTests(Set.of(), tempDir);
         assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void findsCrossModuleTestViaImport() throws IOException {
+        // Simulate: PaymentDetails in api module, test in application module
+        Path appTestDir = tempDir.resolve("application/src/test/java/com/example/tests");
+        Files.createDirectories(appTestDir);
+        Files.writeString(appTestDir.resolve("OverseasPaymentDetailValidatorTest.java"), """
+                package com.example.tests;
+
+                import com.modulr.modulo.payment.services.PaymentDetails;
+
+                public class OverseasPaymentDetailValidatorTest {
+                    public void testValidate(PaymentDetails pd) {}
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.modulr.modulo.payment.services.PaymentDetails"), tempDir);
+
+        assertTrue(result.contains("com.example.tests.OverseasPaymentDetailValidatorTest"),
+                "Should find test in sub-module that imports the changed class");
     }
 }

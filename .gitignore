@@ -38,3 +38,15 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+### Secrets / credentials ###
+*.env
+*.env.*
+local.properties
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+credentials*
+secrets*

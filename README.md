@@ -11,7 +11,7 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '1.1.0'
+    id 'io.affectedtests' version '1.3.0'
 }
 ```
 
@@ -101,13 +101,13 @@ affectedTests {
 
 3. DISCOVER AFFECTED TESTS
    Strategy A: Naming convention (FooBar → FooBarTest, FooBarIT, …)
-   Strategy B: Usage scanning (parse test sources for field references)
+   Strategy B: Usage scanning (import + type reference matching)
    Strategy C: Implementation discovery (interface → impl → impl tests)
    Strategy D: Transitive dependencies (controller → service → repo tests)
    → list of test class FQNs
 
 4. RUN TESTS
-   Gradle test { filter { includeTests("...") } }
+   ./gradlew test --tests "com.example.FooTest" --tests "..."
    → only affected tests execute
 ```
 
@@ -116,13 +116,13 @@ affectedTests {
 | Strategy | What it does |
 |----------|-------------|
 | **naming** | Looks for `FooBarTest`, `FooBarIT`, etc. in test directories |
-| **usage** | Parses test files for field declarations that reference the changed class |
+| **usage** | If a test file **imports** the changed class, that test is affected. Also scans for type references via wildcard imports and same-package usage. Catches fields, method parameters, local variables, constructor calls, generics, casts — any reference. |
 | **impl** | When an interface/base class changes, also tests its implementations |
 | **transitive** | Follows the dependency graph N levels deep (configurable) |
 
 ## Multi-Module Support
 
-For projects where tests for one module live in another:
+For projects where tests for one module live in another (e.g. `api` classes are tested in `application`):
 
 ```groovy
 affectedTests {
@@ -132,6 +132,8 @@ affectedTests {
     ]
 }
 ```
+
+When a class in `:api` changes, the plugin will search for affected tests in both the root project and the `:application` module. This ensures cross-module imports (e.g. a test in `application` that imports a class from `api`) are detected correctly.
 
 ## Fallback Behavior
 

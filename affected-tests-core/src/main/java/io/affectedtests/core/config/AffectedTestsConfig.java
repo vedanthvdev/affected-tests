@@ -74,7 +74,21 @@ public final class AffectedTestsConfig {
         private List<String> implementationNaming = List.of("Impl");
         private Map<String, String> testProjectMapping = Map.of();
 
-        public Builder baseRef(String baseRef) { this.baseRef = baseRef; return this; }
+        public Builder baseRef(String baseRef) {
+            if (baseRef == null || baseRef.isBlank()) {
+                throw new IllegalArgumentException("baseRef must not be null or blank");
+            }
+            if (baseRef.contains("..") && baseRef.contains("/")) {
+                // Prevent path traversal in ref names like "../../etc/passwd"
+                // (normal refs like "origin/master" or SHAs are fine)
+                String normalized = baseRef.replace("\\", "/");
+                if (normalized.contains("../")) {
+                    throw new IllegalArgumentException("baseRef contains suspicious path traversal: " + baseRef);
+                }
+            }
+            this.baseRef = baseRef;
+            return this;
+        }
         public Builder includeUncommitted(boolean v) { this.includeUncommitted = v; return this; }
         public Builder includeStaged(boolean v) { this.includeStaged = v; return this; }
         public Builder runAllIfNoMatches(boolean v) { this.runAllIfNoMatches = v; return this; }
