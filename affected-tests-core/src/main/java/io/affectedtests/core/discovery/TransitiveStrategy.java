@@ -14,11 +14,18 @@ import java.nio.file.Path;
 import java.util.*;
 
 /**
- * Strategy: Transitive / Downstream.
+ * Strategy: Reverse Transitive / "Used-by".
  * <p>
- * When a production class changes, follows its dependency graph to find additional
- * production types it uses (field types, parameter types). Then discovers tests for
- * those downstream types. Depth is configurable via {@code transitiveDepth}.
+ * Builds a reverse dependency map of all production classes: for each class,
+ * which other classes depend on it (have it as a field type). When a class
+ * changes, walks this "used-by" graph N levels deep to find consumers, then
+ * discovers tests for those consumers via the naming and usage strategies.
+ * <p>
+ * Depth is configurable via {@code transitiveDepth} (default 2, max 5).
+ * <p>
+ * Example: if {@code PaymentGateway} changes and {@code PaymentService} has a
+ * {@code PaymentGateway} field, then at depth 1 we discover
+ * {@code PaymentServiceTest} via naming.
  */
 public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
