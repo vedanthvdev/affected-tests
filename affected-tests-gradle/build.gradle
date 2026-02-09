@@ -1,0 +1,27 @@
+plugins {
+    id 'java-gradle-plugin'
+    id 'maven-publish'
+}
+
+dependencies {
+    implementation project(':affected-tests-core')
+}
+
+gradlePlugin {
+    plugins {
+        affectedTests {
+            id = 'io.affectedtests'
+            implementationClass = 'io.affectedtests.gradle.AffectedTestsPlugin'
+            displayName = 'Affected Tests Plugin'
+            description = 'Detects changes in the current branch and runs only the tests relevant to those changes.'
+        }
+    }
+}
+
+publishing {
+    publications {
+        pluginMaven(MavenPublication) {
+            artifactId = 'affected-tests-gradle'
+        }
+    }
+}

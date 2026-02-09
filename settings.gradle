@@ -1,1 +1,4 @@
-rootProject.name = 'affected-tests-gradle'
+rootProject.name = 'affected-tests'
+
+include 'affected-tests-core'
+include 'affected-tests-gradle'

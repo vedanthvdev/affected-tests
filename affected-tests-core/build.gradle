@@ -1,0 +1,20 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+dependencies {
+    api 'org.eclipse.jgit:org.eclipse.jgit:7.1.0.202411261347-r'
+    api 'com.github.javaparser:javaparser-core:3.26.3'
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    testImplementation 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'affected-tests-core'
+        }
+    }
+}

@@ -2,19 +2,35 @@ plugins {
     id 'java'
 }
 
-group = 'io.affectedtests'
-version = '1.0-SNAPSHOT'
+allprojects {
+    group = 'io.affectedtests'
+    version = '1.1.0'
 
-repositories {
-    mavenCentral()
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
 }
 
-dependencies {
-    testImplementation platform('org.junit:junit-bom:5.10.0')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-}
+subprojects {
+    apply plugin: 'java-library'
 
-test {
-    useJUnitPlatform()
+    java {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.release = 21
+    }
+
+    dependencies {
+        testImplementation platform('org.junit:junit-bom:5.10.0')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    test {
+        useJUnitPlatform()
+    }
 }
