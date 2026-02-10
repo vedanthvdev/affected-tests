@@ -14,6 +14,13 @@ version = rootProject.version
 
 // Shadow the core library into the plugin JAR so consumers don't need to resolve it separately.
 // Relocate to avoid classpath conflicts with user's own JGit/JavaParser versions.
+//
+// With plugin-publish 2.0+ and Shadow 9.x, plugin-publish automatically detects Shadow
+// and publishes the shadow JAR as the plugin artifact. We only need to:
+// 1. Set archiveClassifier to '' so the shadow JAR replaces the default JAR
+// 2. Disable the default jar task to avoid classifier collisions
+// 3. Configure relocations
+// See: https://gradleup.com/shadow/publishing/#publishing-the-shadowed-gradle-plugins
 shadowJar {
     archiveClassifier.set('')
     relocate 'org.eclipse.jgit', 'io.affectedtests.shadow.jgit'
@@ -22,24 +29,36 @@ shadowJar {
     mergeServiceFiles()
 }
 
-// Replace the default jar with the shadow jar for publishing
+// Disable the default jar — shadow JAR takes its place
 tasks.named('jar') {
     enabled = false
 }
 
-// Ensure shadowJar runs before anything that needs the jar
-components.java {
-    withVariantsFromConfiguration(configurations.shadowRuntimeElements) {
-        skip()
+// Functional tests using Gradle TestKit — these catch build-time wiring issues
+// (e.g. Shadow/plugin-publish variant errors) that unit tests with ProjectBuilder miss.
+sourceSets {
+    functionalTest {
+        java.srcDir 'src/functionalTest/java'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
     }
 }
 
-// Wire shadowJar output as the artifact for publishing
 configurations {
-    [apiElements, runtimeElements].each {
-        it.outgoing.artifacts.removeIf { it.buildDependencies.getDependencies(null).contains(tasks.jar) }
-        it.outgoing.artifact(tasks.shadowJar)
-    }
+    functionalTestImplementation.extendsFrom testImplementation
+    functionalTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.register('functionalTest', Test) {
+    description = 'Runs functional tests with Gradle TestKit.'
+    group = 'verification'
+    testClassesDirs = sourceSets.functionalTest.output.classesDirs
+    classpath = sourceSets.functionalTest.runtimeClasspath
+    useJUnitPlatform()
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('functionalTest')
 }
 
 gradlePlugin {
