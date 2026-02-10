@@ -29,24 +29,24 @@ class ImplementationStrategyTest {
 
     @Test
     void findsTestForImplementationClass() throws IOException {
-        // Production: interface PaymentService
+        // Production: interface FooService
         Path prodDir = tempDir.resolve("src/main/java/com/example");
         Files.createDirectories(prodDir);
-        Files.writeString(prodDir.resolve("PaymentService.java"),
-                "package com.example;\npublic interface PaymentService {}");
-        Files.writeString(prodDir.resolve("PaymentServiceImpl.java"),
-                "package com.example;\npublic class PaymentServiceImpl implements PaymentService {}");
+        Files.writeString(prodDir.resolve("FooService.java"),
+                "package com.example;\npublic interface FooService {}");
+        Files.writeString(prodDir.resolve("FooServiceImpl.java"),
+                "package com.example;\npublic class FooServiceImpl implements FooService {}");
 
         // Test for the impl
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
-        Files.writeString(testDir.resolve("PaymentServiceImplTest.java"),
-                "package com.example;\npublic class PaymentServiceImplTest {}");
+        Files.writeString(testDir.resolve("FooServiceImplTest.java"),
+                "package com.example;\npublic class FooServiceImplTest {}");
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.PaymentService"), tempDir);
+                Set.of("com.example.FooService"), tempDir);
 
-        assertTrue(result.contains("com.example.PaymentServiceImplTest"),
+        assertTrue(result.contains("com.example.FooServiceImplTest"),
                 "Should find test for the Impl class via naming");
     }
 

@@ -11,7 +11,7 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '1.5.0'
+    id 'io.affectedtests' version '1.6.0'
 }
 ```
 
@@ -117,14 +117,14 @@ All four strategies run against every changed production class. Their results ar
 
 | Strategy | What it does | Example |
 |----------|-------------|---------|
-| **naming** | For each changed class `Foo`, looks for test files named `FooTest`, `FooIT`, `FooITTest`, `FooIntegrationTest` (configurable suffixes). Purely file-name based — no parsing required. | `PaymentService` changed → finds `PaymentServiceTest`, `PaymentServiceIT` |
-| **usage** | Parses every test file with JavaParser and checks whether it references any changed class. Uses a two-tier approach: **(1)** direct import match — if the test has `import com.example.PaymentService;`, it's affected regardless of how it uses the class; **(2)** type-reference scan for wildcard imports (`import com.example.*`) and same-package usage (no import needed). Catches fields, method parameters, return types, constructor calls, generics, and casts. | `PaymentDetails` changed → finds `OverseasPaymentDetailValidatorTest` (imports it), `InternalTest` (same package, uses it as field type) |
-| **impl** | When an interface or base class changes, scans all production source files to find classes that `extends` or `implements` the changed type (via AST) and classes following the `*Impl` naming convention. Then re-runs the naming and usage strategies on those implementations. | `PaymentService` (interface) changed → finds `PaymentServiceImpl` → finds `PaymentServiceImplTest` |
-| **transitive** | Builds a reverse dependency map of all production classes: for each class, which other classes depend on it (via field types). When a class changes, walks this "used-by" graph N levels deep (configurable, default 2, max 5) to find consumers. Then runs naming + usage on those consumers. | `PaymentGateway` changed → `PaymentService` uses it (depth 1) → finds `PaymentServiceTest` via naming |
+| **naming** | For each changed class `Foo`, looks for test files named `FooTest`, `FooIT`, `FooITTest`, `FooIntegrationTest` (configurable suffixes). Purely file-name based — no parsing required. | `FooService` changed → finds `FooServiceTest`, `FooServiceIT` |
+| **usage** | Parses every test file with JavaParser and checks whether it references any changed class. Uses a two-tier approach: **(1)** direct import match — if the test has `import com.example.FooService;`, it's affected regardless of how it uses the class; **(2)** type-reference scan for wildcard imports (`import com.example.*`) and same-package usage (no import needed). Catches fields, method parameters, return types, constructor calls, generics, and casts. | `BarModel` changed → finds `BarValidatorTest` (imports it), `BazMapperTest` (same package, uses it as field type) |
+| **impl** | When an interface or base class changes, scans all production source files to find classes that `extends` or `implements` the changed type (via AST) and classes following the `*Impl` naming convention. Then re-runs the naming and usage strategies on those implementations. | `FooService` (interface) changed → finds `FooServiceImpl` → finds `FooServiceImplTest` |
+| **transitive** | Builds a reverse dependency map of all production classes: for each class, which other classes depend on it (via field types). When a class changes, walks this "used-by" graph N levels deep (configurable, default 2, max 5) to find consumers. Then runs naming + usage on those consumers. | `BazGateway` changed → `FooService` uses it (depth 1) → finds `FooServiceTest` via naming |
 
 ### How scanning works
 
-The plugin scans the project tree **recursively at any depth** to find source and test directories. It is completely project-structure agnostic — it does not assume any particular module layout. Whether your modules are flat (`api/src/test/java`), nested (`services/payment/src/test/java`), or deeply nested (`platform/services/payment/src/test/java`), all test files are discovered.
+The plugin scans the project tree **recursively at any depth** to find source and test directories. It is completely project-structure agnostic — it does not assume any particular module layout. Whether your modules are flat (`api/src/test/java`), nested (`services/orders/src/test/java`), or deeply nested (`platform/services/orders/src/test/java`), all test files are discovered.
 
 Directories like `.git`, `build`, `.gradle`, and `node_modules` are automatically skipped during the walk.
 

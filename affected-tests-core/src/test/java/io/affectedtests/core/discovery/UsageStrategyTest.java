@@ -29,20 +29,20 @@ class UsageStrategyTest {
     void findsTestThatImportsChangedClass() throws IOException {
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
-        Files.writeString(testDir.resolve("OverseasValidatorTest.java"), """
+        Files.writeString(testDir.resolve("BazValidatorTest.java"), """
                 package com.example;
 
-                import com.example.service.PaymentDetails;
+                import com.example.service.FooModel;
 
-                public class OverseasValidatorTest {
-                    public void testValidate(PaymentDetails details) {}
+                public class BazValidatorTest {
+                    public void testValidate(FooModel details) {}
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.PaymentDetails"), tempDir);
+                Set.of("com.example.service.FooModel"), tempDir);
 
-        assertTrue(result.contains("com.example.OverseasValidatorTest"),
+        assertTrue(result.contains("com.example.BazValidatorTest"),
                 "Should match test that imports the changed class");
     }
 
@@ -50,20 +50,20 @@ class UsageStrategyTest {
     void findsTestThatUsesChangedClassAsField() throws IOException {
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
-        Files.writeString(testDir.resolve("UserControllerIT.java"), """
+        Files.writeString(testDir.resolve("BarControllerIT.java"), """
                 package com.example;
 
-                import com.example.service.UserService;
+                import com.example.service.FooService;
 
-                public class UserControllerIT {
-                    private UserService userService;
+                public class BarControllerIT {
+                    private FooService fooService;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.UserService"), tempDir);
+                Set.of("com.example.service.FooService"), tempDir);
 
-        assertTrue(result.contains("com.example.UserControllerIT"));
+        assertTrue(result.contains("com.example.BarControllerIT"));
     }
 
     @Test
@@ -73,17 +73,17 @@ class UsageStrategyTest {
         Files.writeString(testDir.resolve("ServiceIT.java"), """
                 package com.example;
 
-                import com.example.service.OrderService;
+                import com.example.service.FooService;
                 import org.springframework.beans.factory.annotation.Autowired;
 
                 public class ServiceIT {
                     @Autowired
-                    private OrderService orderService;
+                    private FooService fooService;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.OrderService"), tempDir);
+                Set.of("com.example.service.FooService"), tempDir);
 
         assertTrue(result.contains("com.example.ServiceIT"));
     }
@@ -114,22 +114,22 @@ class UsageStrategyTest {
     void findsTestThatUsesChangedClassAsMethodParameter() throws IOException {
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
-        Files.writeString(testDir.resolve("PaymentMapperTest.java"), """
+        Files.writeString(testDir.resolve("BazMapperTest.java"), """
                 package com.example;
 
-                import com.modulr.modulo.payment.services.PaymentDetails;
+                import com.example.service.BarModel;
 
-                public class PaymentMapperTest {
-                    public void testMap(PaymentDetails details) {
-                        // uses PaymentDetails as method param only
+                public class BazMapperTest {
+                    public void testMap(BarModel item) {
+                        // uses BarModel as method param only
                     }
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.modulr.modulo.payment.services.PaymentDetails"), tempDir);
+                Set.of("com.example.service.BarModel"), tempDir);
 
-        assertTrue(result.contains("com.example.PaymentMapperTest"),
+        assertTrue(result.contains("com.example.BazMapperTest"),
                 "Should match test that imports the changed class even without a field");
     }
 
@@ -140,17 +140,17 @@ class UsageStrategyTest {
         Files.writeString(testDir.resolve("FactoryTest.java"), """
                 package com.example;
 
-                import com.example.service.PaymentDetails;
+                import com.example.service.BarModel;
 
                 public class FactoryTest {
                     public void testCreate() {
-                        PaymentDetails pd = new PaymentDetails();
+                        BarModel bm = new BarModel();
                     }
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.PaymentDetails"), tempDir);
+                Set.of("com.example.service.BarModel"), tempDir);
 
         assertTrue(result.contains("com.example.FactoryTest"),
                 "Should match test that creates instances of the changed class");
@@ -166,12 +166,12 @@ class UsageStrategyTest {
                 import com.example.service.*;
 
                 public class WildcardTest {
-                    private PaymentDetails details;
+                    private BarModel item;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.PaymentDetails"), tempDir);
+                Set.of("com.example.service.BarModel"), tempDir);
 
         assertTrue(result.contains("com.example.WildcardTest"),
                 "Should match test with wildcard import covering the changed class's package");
@@ -185,12 +185,12 @@ class UsageStrategyTest {
                 package com.example.service;
 
                 public class InternalTest {
-                    private PaymentDetails details;
+                    private BarModel item;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.PaymentDetails"), tempDir);
+                Set.of("com.example.service.BarModel"), tempDir);
 
         assertTrue(result.contains("com.example.service.InternalTest"),
                 "Should match test in same package (no import needed)");
@@ -224,46 +224,46 @@ class UsageStrategyTest {
 
     @Test
     void findsCrossModuleTestViaImport() throws IOException {
-        // Simulate: PaymentDetails in api module, test in application module
+        // Simulate: FooModel in api module, test in application module
         Path appTestDir = tempDir.resolve("application/src/test/java/com/example/tests");
         Files.createDirectories(appTestDir);
-        Files.writeString(appTestDir.resolve("OverseasPaymentDetailValidatorTest.java"), """
+        Files.writeString(appTestDir.resolve("BazValidatorTest.java"), """
                 package com.example.tests;
 
-                import com.modulr.modulo.payment.services.PaymentDetails;
+                import com.example.api.FooModel;
 
-                public class OverseasPaymentDetailValidatorTest {
-                    public void testValidate(PaymentDetails pd) {}
+                public class BazValidatorTest {
+                    public void testValidate(FooModel fm) {}
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.modulr.modulo.payment.services.PaymentDetails"), tempDir);
+                Set.of("com.example.api.FooModel"), tempDir);
 
-        assertTrue(result.contains("com.example.tests.OverseasPaymentDetailValidatorTest"),
+        assertTrue(result.contains("com.example.tests.BazValidatorTest"),
                 "Should find test in sub-module that imports the changed class");
     }
 
     @Test
     void findsTestInDeeplyNestedModule() throws IOException {
-        // Depth 2: services/payment/src/test/java/...
-        Path deepTestDir = tempDir.resolve("services/payment/src/test/java/com/example");
+        // Depth 2: services/core/src/test/java/...
+        Path deepTestDir = tempDir.resolve("services/core/src/test/java/com/example");
         Files.createDirectories(deepTestDir);
-        Files.writeString(deepTestDir.resolve("PaymentGatewayIT.java"), """
+        Files.writeString(deepTestDir.resolve("BazGatewayIT.java"), """
                 package com.example;
 
-                import com.example.service.PaymentGateway;
+                import com.example.service.BazGateway;
 
-                public class PaymentGatewayIT {
-                    private PaymentGateway gateway;
+                public class BazGatewayIT {
+                    private BazGateway gateway;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.PaymentGateway"), tempDir);
+                Set.of("com.example.service.BazGateway"), tempDir);
 
-        assertTrue(result.contains("com.example.PaymentGatewayIT"),
-                "Should find test nested 2 levels deep: services/payment/src/test/java");
+        assertTrue(result.contains("com.example.BazGatewayIT"),
+                "Should find test nested 2 levels deep: services/core/src/test/java");
     }
 
     @Test
@@ -274,28 +274,28 @@ class UsageStrategyTest {
         Files.writeString(apiTestDir.resolve("ShallowTest.java"), """
                 package com.example;
 
-                import com.example.service.UserService;
+                import com.example.service.QuxService;
 
                 public class ShallowTest {
-                    private UserService svc;
+                    private QuxService svc;
                 }
                 """);
 
         // Depth 3
-        Path deepTestDir = tempDir.resolve("platform/services/user/src/test/java/com/example");
+        Path deepTestDir = tempDir.resolve("platform/services/core/src/test/java/com/example");
         Files.createDirectories(deepTestDir);
         Files.writeString(deepTestDir.resolve("DeepTest.java"), """
                 package com.example;
 
-                import com.example.service.UserService;
+                import com.example.service.QuxService;
 
                 public class DeepTest {
-                    private UserService svc;
+                    private QuxService svc;
                 }
                 """);
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.service.UserService"), tempDir);
+                Set.of("com.example.service.QuxService"), tempDir);
 
         assertTrue(result.contains("com.example.ShallowTest"),
                 "Should find test at depth 1");

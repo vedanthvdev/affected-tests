@@ -31,31 +31,31 @@ class TransitiveStrategyTest {
 
     @Test
     void discoversTestViaTransitiveDependency() throws IOException {
-        // OrderService depends on PaymentService (via field)
+        // BarService depends on FooService (via field)
         Path prodDir = tempDir.resolve("src/main/java/com/example");
         Files.createDirectories(prodDir);
-        Files.writeString(prodDir.resolve("PaymentService.java"),
-                "package com.example;\npublic class PaymentService {}");
-        Files.writeString(prodDir.resolve("OrderService.java"), """
+        Files.writeString(prodDir.resolve("FooService.java"),
+                "package com.example;\npublic class FooService {}");
+        Files.writeString(prodDir.resolve("BarService.java"), """
                 package com.example;
                 
-                public class OrderService {
-                    private PaymentService paymentService;
+                public class BarService {
+                    private FooService fooService;
                 }
                 """);
 
-        // Test for OrderService (transitive dependency of PaymentService)
+        // Test for BarService (transitive dependency of FooService)
         Path testDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(testDir);
-        Files.writeString(testDir.resolve("OrderServiceTest.java"),
-                "package com.example;\npublic class OrderServiceTest {}");
+        Files.writeString(testDir.resolve("BarServiceTest.java"),
+                "package com.example;\npublic class BarServiceTest {}");
 
-        // Changed: PaymentService
+        // Changed: FooService
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.PaymentService"), tempDir);
+                Set.of("com.example.FooService"), tempDir);
 
-        assertTrue(result.contains("com.example.OrderServiceTest"),
-                "Should discover test for OrderService (depends on changed PaymentService)");
+        assertTrue(result.contains("com.example.BarServiceTest"),
+                "Should discover test for BarService (depends on changed FooService)");
     }
 
     @Test

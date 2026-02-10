@@ -34,13 +34,13 @@ class PathToClassMapperTest {
     @Test
     void mapsMultiModulePaths() {
         Set<String> changed = Set.of(
-                "api/src/main/java/com/example/api/UserDto.java",
-                "application/src/test/java/com/example/UserDtoTest.java"
+                "api/src/main/java/com/example/api/FooDto.java",
+                "application/src/test/java/com/example/FooDtoTest.java"
         );
         MappingResult result = mapper.mapChangedFiles(changed);
 
-        assertTrue(result.productionClasses().contains("com.example.api.UserDto"));
-        assertTrue(result.testClasses().contains("com.example.UserDtoTest"));
+        assertTrue(result.productionClasses().contains("com.example.api.FooDto"));
+        assertTrue(result.testClasses().contains("com.example.FooDtoTest"));
     }
 
     @Test
@@ -90,7 +90,7 @@ class PathToClassMapperTest {
 
     @Test
     void extractModuleHandlesNestedPaths() {
-        assertEquals("services/payment-api",
-                mapper.extractModule("services/payment-api/src/main/java/com/example/Foo.java"));
+        assertEquals("services/core-api",
+                mapper.extractModule("services/core-api/src/main/java/com/example/Foo.java"));
     }
 }
