@@ -33,7 +33,7 @@ import java.util.*;
  *
  * <p>Examples it catches:
  * <ul>
- *   <li>{@code import com.example.PaymentDetails;} (any usage in the file)</li>
+ *   <li>{@code import com.example.FooService;} (any usage in the file)</li>
  *   <li>{@code private FooBar underTest;}</li>
  *   <li>{@code @Autowired private FooBar fooBar;}</li>
  *   <li>{@code @Mock private FooBar fooBar;}</li>

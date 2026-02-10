@@ -23,9 +23,9 @@ import java.util.*;
  * <p>
  * Depth is configurable via {@code transitiveDepth} (default 2, max 5).
  * <p>
- * Example: if {@code PaymentGateway} changes and {@code PaymentService} has a
- * {@code PaymentGateway} field, then at depth 1 we discover
- * {@code PaymentServiceTest} via naming.
+ * Example: if {@code BazGateway} changes and {@code FooService} has a
+ * {@code BazGateway} field, then at depth 1 we discover
+ * {@code FooServiceTest} via naming.
  */
 public final class TransitiveStrategy implements TestDiscoveryStrategy {
 

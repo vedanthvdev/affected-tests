@@ -82,28 +82,28 @@ class NamingConventionStrategyTest {
     void findsTestsInSubModules() throws IOException {
         Path moduleTestDir = tempDir.resolve("application/src/test/java/com/example");
         Files.createDirectories(moduleTestDir);
-        Files.writeString(moduleTestDir.resolve("UserServiceTest.java"),
-                "package com.example;\npublic class UserServiceTest {}");
+        Files.writeString(moduleTestDir.resolve("BarServiceTest.java"),
+                "package com.example;\npublic class BarServiceTest {}");
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.UserService"), tempDir);
+                Set.of("com.example.BarService"), tempDir);
 
-        assertTrue(result.contains("com.example.UserServiceTest"));
+        assertTrue(result.contains("com.example.BarServiceTest"));
     }
 
     @Test
     void findsTestsInDeeplyNestedModules() throws IOException {
-        // Depth 2: services/payment/src/test/java/...
-        Path deepTestDir = tempDir.resolve("services/payment/src/test/java/com/example");
+        // Depth 2: services/core/src/test/java/...
+        Path deepTestDir = tempDir.resolve("services/core/src/test/java/com/example");
         Files.createDirectories(deepTestDir);
-        Files.writeString(deepTestDir.resolve("PaymentServiceTest.java"),
-                "package com.example;\npublic class PaymentServiceTest {}");
+        Files.writeString(deepTestDir.resolve("BazServiceTest.java"),
+                "package com.example;\npublic class BazServiceTest {}");
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.PaymentService"), tempDir);
+                Set.of("com.example.BazService"), tempDir);
 
-        assertTrue(result.contains("com.example.PaymentServiceTest"),
-                "Should find test nested 2 levels deep: services/payment/src/test/java");
+        assertTrue(result.contains("com.example.BazServiceTest"),
+                "Should find test nested 2 levels deep: services/core/src/test/java");
     }
 
     @Test
@@ -111,27 +111,27 @@ class NamingConventionStrategyTest {
         // Root level
         Path rootTestDir = tempDir.resolve("src/test/java/com/example");
         Files.createDirectories(rootTestDir);
-        Files.writeString(rootTestDir.resolve("OrderServiceTest.java"),
-                "package com.example;\npublic class OrderServiceTest {}");
+        Files.writeString(rootTestDir.resolve("FooServiceTest.java"),
+                "package com.example;\npublic class FooServiceTest {}");
 
         // Depth 1
         Path apiTestDir = tempDir.resolve("api/src/test/java/com/example");
         Files.createDirectories(apiTestDir);
-        Files.writeString(apiTestDir.resolve("OrderServiceIT.java"),
-                "package com.example;\npublic class OrderServiceIT {}");
+        Files.writeString(apiTestDir.resolve("FooServiceIT.java"),
+                "package com.example;\npublic class FooServiceIT {}");
 
         // Depth 2
-        Path deepTestDir = tempDir.resolve("services/order/src/test/java/com/example");
+        Path deepTestDir = tempDir.resolve("services/foo/src/test/java/com/example");
         Files.createDirectories(deepTestDir);
-        Files.writeString(deepTestDir.resolve("OrderServiceIntegrationTest.java"),
-                "package com.example;\npublic class OrderServiceIntegrationTest {}");
+        Files.writeString(deepTestDir.resolve("FooServiceIntegrationTest.java"),
+                "package com.example;\npublic class FooServiceIntegrationTest {}");
 
         Set<String> result = strategy.discoverTests(
-                Set.of("com.example.OrderService"), tempDir);
+                Set.of("com.example.FooService"), tempDir);
 
         assertEquals(3, result.size(), "Should find tests at root, depth 1, and depth 2");
-        assertTrue(result.contains("com.example.OrderServiceTest"));
-        assertTrue(result.contains("com.example.OrderServiceIT"));
-        assertTrue(result.contains("com.example.OrderServiceIntegrationTest"));
+        assertTrue(result.contains("com.example.FooServiceTest"));
+        assertTrue(result.contains("com.example.FooServiceIT"));
+        assertTrue(result.contains("com.example.FooServiceIntegrationTest"));
     }
 }
