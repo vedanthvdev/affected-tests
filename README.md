@@ -11,7 +11,7 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '1.6.0'
+    id 'io.affectedtests' version '1.7.0'
 }
 ```
 
