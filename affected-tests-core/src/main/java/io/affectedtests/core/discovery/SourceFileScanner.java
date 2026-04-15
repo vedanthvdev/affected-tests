@@ -178,6 +178,54 @@ public final class SourceFileScanner {
         return dot >= 0 ? fqn.substring(0, dot) : "";
     }
 
+    // ── FQN extraction from file paths ────────────────────────────────
+
+    /**
+     * Derives a fully-qualified class name from a file path by finding the
+     * first matching source directory suffix and stripping the prefix + suffix.
+     *
+     * @param file       absolute path to the Java file
+     * @param sourceDirs source directory suffixes (e.g. {@code ["src/main/java"]})
+     * @return the FQN, or {@code null} if no source dir matched
+     */
+    public static String pathToFqn(Path file, List<String> sourceDirs) {
+        String filePath = file.toString().replace(java.io.File.separatorChar, '/');
+        for (String sourceDir : sourceDirs) {
+            String normalizedDir = sourceDir.replace('\\', '/');
+            if (!normalizedDir.endsWith("/")) normalizedDir += "/";
+
+            int idx = filePath.indexOf(normalizedDir);
+            if (idx >= 0) {
+                String relative = filePath.substring(idx + normalizedDir.length());
+                if (relative.endsWith(".java")) {
+                    relative = relative.substring(0, relative.length() - 5);
+                }
+                return relative.replace('/', '.');
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Finds the root directory of a test source tree by walking up the parent
+     * chain until a directory matching the given test directory suffix is found.
+     *
+     * @param file    absolute path to the test file
+     * @param testDir test directory suffix (e.g. {@code "src/test/java"})
+     * @return the matched test root path, or {@code null} if not found
+     */
+    public static Path findTestRoot(Path file, String testDir) {
+        Path current = file.getParent();
+        String normalizedTestDir = testDir.replace('/', java.io.File.separatorChar);
+        while (current != null) {
+            if (current.toString().endsWith(normalizedTestDir)) {
+                return current;
+            }
+            current = current.getParent();
+        }
+        return null;
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /**

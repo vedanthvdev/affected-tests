@@ -5,6 +5,8 @@ import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
@@ -50,6 +52,20 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
     @Override
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
+        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
+        return walkTransitives(changedProductionClasses, sourceFiles, projectDir, null);
+    }
+
+    /**
+     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     */
+    public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
+        return walkTransitives(changedProductionClasses, index.sourceFiles(), null, index);
+    }
+
+    private Set<String> walkTransitives(Set<String> changedProductionClasses,
+                                        List<Path> sourceFiles,
+                                        Path projectDir, ProjectIndex index) {
         Set<String> discoveredTests = new LinkedHashSet<>();
 
         if (config.transitiveDepth() <= 0) {
@@ -57,12 +73,10 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
             return discoveredTests;
         }
 
-        // Build the dependency graph level by level
         Set<String> currentLevel = new LinkedHashSet<>(changedProductionClasses);
         Set<String> allVisited = new LinkedHashSet<>(changedProductionClasses);
 
-        // Pre-index: reverse map — FQN → set of FQNs that depend on it
-        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(projectDir);
+        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(sourceFiles);
 
         for (int depth = 1; depth <= config.transitiveDepth(); depth++) {
             Set<String> nextLevel = new LinkedHashSet<>();
@@ -84,9 +98,13 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
             log.debug("[transitive] Depth {}: found {} downstream types", depth, nextLevel.size());
 
-            // Discover tests for these downstream types
-            discoveredTests.addAll(namingStrategy.discoverTests(nextLevel, projectDir));
-            discoveredTests.addAll(usageStrategy.discoverTests(nextLevel, projectDir));
+            if (index != null) {
+                discoveredTests.addAll(namingStrategy.discoverTests(nextLevel, index));
+                discoveredTests.addAll(usageStrategy.discoverTests(nextLevel, index));
+            } else {
+                discoveredTests.addAll(namingStrategy.discoverTests(nextLevel, projectDir));
+                discoveredTests.addAll(usageStrategy.discoverTests(nextLevel, projectDir));
+            }
 
             currentLevel = nextLevel;
         }
@@ -102,9 +120,8 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
      * (i.e. have it as a field type). This is the "usedBy" direction, so when a
      * class changes we can find all classes that consume it.
      */
-    private Map<String, Set<String>> buildReverseDependencyMap(Path projectDir) {
+    private Map<String, Set<String>> buildReverseDependencyMap(List<Path> sourceFiles) {
         Map<String, Set<String>> reverseMap = new HashMap<>();
-        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
         JavaParser parser = new JavaParser();
 
         // First pass: collect all known FQNs so we can resolve simple names
@@ -142,40 +159,47 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                         .map(pd -> pd.getNameAsString())
                         .orElse("");
 
-                // Extract field types
-                List<FieldDeclaration> fields = cu.findAll(FieldDeclaration.class);
-                for (FieldDeclaration field : fields) {
-                    for (VariableDeclarator var : field.getVariables()) {
-                        String typeName = var.getTypeAsString();
-                        if (typeName.contains("<")) {
-                            typeName = typeName.substring(0, typeName.indexOf('<'));
-                        }
+                Set<String> referencedTypes = new LinkedHashSet<>();
 
-                        // Resolve to FQN
-                        String resolvedFqn = importMap.get(typeName);
-                        if (resolvedFqn == null) {
-                            String candidate = currentPackage.isEmpty()
-                                    ? typeName : currentPackage + "." + typeName;
+                // Extract field types
+                for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
+                    for (VariableDeclarator var : field.getVariables()) {
+                        referencedTypes.add(stripGenerics(var.getTypeAsString()));
+                    }
+                }
+
+                // Extract method parameter types and return types
+                for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
+                    referencedTypes.add(stripGenerics(method.getTypeAsString()));
+                    for (Parameter param : method.getParameters()) {
+                        referencedTypes.add(stripGenerics(param.getTypeAsString()));
+                    }
+                }
+
+                // Resolve each referenced type and build reverse edges
+                for (String typeName : referencedTypes) {
+                    String resolvedFqn = importMap.get(typeName);
+                    if (resolvedFqn == null) {
+                        String candidate = currentPackage.isEmpty()
+                                ? typeName : currentPackage + "." + typeName;
+                        if (allKnownFqns.contains(candidate)) {
+                            resolvedFqn = candidate;
+                        }
+                    }
+                    if (resolvedFqn == null) {
+                        for (String pkg : wildcardPackages) {
+                            String candidate = pkg + "." + typeName;
                             if (allKnownFqns.contains(candidate)) {
                                 resolvedFqn = candidate;
+                                break;
                             }
                         }
-                        if (resolvedFqn == null) {
-                            for (String pkg : wildcardPackages) {
-                                String candidate = pkg + "." + typeName;
-                                if (allKnownFqns.contains(candidate)) {
-                                    resolvedFqn = candidate;
-                                    break;
-                                }
-                            }
-                        }
+                    }
 
-                        // Reverse edge: resolvedFqn is used by classFqn
-                        if (resolvedFqn != null && allKnownFqns.contains(resolvedFqn)
-                                && !resolvedFqn.equals(classFqn)) {
-                            reverseMap.computeIfAbsent(resolvedFqn, k -> new LinkedHashSet<>())
-                                    .add(classFqn);
-                        }
+                    if (resolvedFqn != null && allKnownFqns.contains(resolvedFqn)
+                            && !resolvedFqn.equals(classFqn)) {
+                        reverseMap.computeIfAbsent(resolvedFqn, k -> new LinkedHashSet<>())
+                                .add(classFqn);
                     }
                 }
             } catch (Exception e) {
@@ -187,21 +211,12 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         return reverseMap;
     }
 
-    private String pathToFqn(Path file) {
-        String filePath = file.toString().replace(java.io.File.separatorChar, '/');
-        for (String sourceDir : config.sourceDirs()) {
-            String normalizedDir = sourceDir.replace('\\', '/');
-            if (!normalizedDir.endsWith("/")) normalizedDir += "/";
+    private static String stripGenerics(String typeName) {
+        int idx = typeName.indexOf('<');
+        return idx >= 0 ? typeName.substring(0, idx) : typeName;
+    }
 
-            int idx = filePath.indexOf(normalizedDir);
-            if (idx >= 0) {
-                String relative = filePath.substring(idx + normalizedDir.length());
-                if (relative.endsWith(".java")) {
-                    relative = relative.substring(0, relative.length() - 5);
-                }
-                return relative.replace('/', '.');
-            }
-        }
-        return null;
+    private String pathToFqn(Path file) {
+        return SourceFileScanner.pathToFqn(file, config.sourceDirs());
     }
 }

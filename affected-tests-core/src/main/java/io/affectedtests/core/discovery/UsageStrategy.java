@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * Strategy: Usage / Reference scanning.
@@ -58,24 +59,33 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
 
     @Override
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
+        List<Path> testFiles = SourceFileScanner.collectTestFiles(projectDir, config.testDirs());
+        return scanTestFiles(changedProductionClasses, testFiles);
+    }
+
+    /**
+     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     */
+    public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
+        return scanTestFiles(changedProductionClasses, index.testFiles());
+    }
+
+    private Set<String> scanTestFiles(Set<String> changedProductionClasses, List<Path> testFiles) {
         Set<String> discoveredTests = new LinkedHashSet<>();
 
         if (changedProductionClasses.isEmpty()) {
             return discoveredTests;
         }
 
-        // Build lookup structures
-        Map<String, String> simpleNameToFqn = new HashMap<>();
+        Map<String, Set<String>> simpleNameToFqns = new HashMap<>();
         Set<String> changedFqns = new HashSet<>(changedProductionClasses);
         Set<String> simpleNames = new HashSet<>();
         for (String fqn : changedProductionClasses) {
             String simpleName = SourceFileScanner.simpleClassName(fqn);
-            simpleNameToFqn.put(simpleName, fqn);
+            simpleNameToFqns.computeIfAbsent(simpleName, k -> new HashSet<>()).add(fqn);
             simpleNames.add(simpleName);
         }
 
-        // Scan all test files
-        List<Path> testFiles = SourceFileScanner.collectTestFiles(projectDir, config.testDirs());
         JavaParser parser = new JavaParser();
 
         for (Path testFile : testFiles) {
@@ -90,10 +100,9 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
                 String testFqn = extractFqn(cu, testFile);
                 if (testFqn == null) continue;
 
-                // Skip if this test class IS one of the changed production classes
                 if (changedFqns.contains(testFqn)) continue;
 
-                if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqn)) {
+                if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqns)) {
                     discoveredTests.add(testFqn);
                     log.debug("Usage match: {}", testFqn);
                 }
@@ -114,7 +123,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
     private boolean testReferencesChangedClass(CompilationUnit cu,
                                                Set<String> changedFqns,
                                                Set<String> simpleNames,
-                                               Map<String, String> simpleNameToFqn) {
+                                               Map<String, Set<String>> simpleNameToFqns) {
         // Collect imports
         Set<String> importedFqns = new HashSet<>();
         Set<String> wildcardPackages = new HashSet<>();
@@ -200,17 +209,17 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
 
     /**
      * Matches a type string against a simple name, handling generics.
+     * Uses word-boundary matching to avoid false positives (e.g. "Id" matching "GridLayout").
      */
     private boolean typeMatches(String typeString, String simpleName) {
         if (typeString.equals(simpleName)) return true;
-        // Could be in generics like "List<FooBar>" or "Map<String, FooBar>"
-        return typeString.contains(simpleName);
+        Pattern pattern = Pattern.compile("(?<![a-zA-Z0-9_])" + Pattern.quote(simpleName) + "(?![a-zA-Z0-9_])");
+        return pattern.matcher(typeString).find();
     }
 
     private String extractFqn(CompilationUnit cu, Path testFile) {
-        // Try to derive FQN from the test directory structure
         for (String testDir : config.testDirs()) {
-            Path testRoot = findTestRoot(testFile, testDir);
+            Path testRoot = SourceFileScanner.findTestRoot(testFile, testDir);
             if (testRoot != null) {
                 Path relative = testRoot.relativize(testFile);
                 String fqn = relative.toString()
@@ -223,24 +232,11 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // Fallback: use package declaration + type name
         String pkg = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
         return cu.getPrimaryTypeName()
                 .map(name -> pkg.isEmpty() ? name : pkg + "." + name)
                 .orElse(null);
-    }
-
-    private Path findTestRoot(Path file, String testDir) {
-        Path current = file.getParent();
-        String normalizedTestDir = testDir.replace('/', java.io.File.separatorChar);
-        while (current != null) {
-            if (current.toString().endsWith(normalizedTestDir)) {
-                return current;
-            }
-            current = current.getParent();
-        }
-        return null;
     }
 }

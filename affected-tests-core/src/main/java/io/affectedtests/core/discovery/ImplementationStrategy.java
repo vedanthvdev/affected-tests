@@ -41,31 +41,50 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
 
     @Override
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
-        Set<String> discoveredTests = new LinkedHashSet<>();
-
         if (!config.includeImplementationTests()) {
             log.debug("[impl] Implementation test discovery disabled");
-            return discoveredTests;
+            return new LinkedHashSet<>();
         }
 
-        // For each changed production class, find implementations
-        Set<String> implClasses = findImplementations(changedProductionClasses, projectDir);
+        Set<String> implClasses = findImplementations(changedProductionClasses,
+                collectSourceFqns(projectDir),
+                SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs()));
+        return discoverTestsForImpls(implClasses, projectDir, null);
+    }
+
+    /**
+     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     */
+    public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
+        if (!config.includeImplementationTests()) {
+            log.debug("[impl] Implementation test discovery disabled");
+            return new LinkedHashSet<>();
+        }
+
+        Set<String> implClasses = findImplementations(changedProductionClasses,
+                index.sourceFqns(), index.sourceFiles());
+        return discoverTestsForImpls(implClasses, null, index);
+    }
+
+    private Set<String> discoverTestsForImpls(Set<String> implClasses, Path projectDir, ProjectIndex index) {
+        Set<String> discoveredTests = new LinkedHashSet<>();
 
         if (!implClasses.isEmpty()) {
-            log.info("[impl] Found {} implementation classes for {} changed classes",
-                    implClasses.size(), changedProductionClasses.size());
+            log.info("[impl] Found {} implementation classes", implClasses.size());
 
-            // Run naming and usage discovery on implementation classes
             if (config.strategies().contains("naming")) {
-                discoveredTests.addAll(namingStrategy.discoverTests(implClasses, projectDir));
+                discoveredTests.addAll(index != null
+                        ? namingStrategy.discoverTests(implClasses, index)
+                        : namingStrategy.discoverTests(implClasses, projectDir));
             }
             if (config.strategies().contains("usage")) {
-                discoveredTests.addAll(usageStrategy.discoverTests(implClasses, projectDir));
+                discoveredTests.addAll(index != null
+                        ? usageStrategy.discoverTests(implClasses, index)
+                        : usageStrategy.discoverTests(implClasses, projectDir));
             }
         }
 
-        log.info("[impl] Discovered {} tests via implementation strategy",
-                discoveredTests.size());
+        log.info("[impl] Discovered {} tests via implementation strategy", discoveredTests.size());
         return discoveredTests;
     }
 
@@ -73,17 +92,17 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
      * Finds classes that extend or implement any of the changed production classes.
      * Uses both JavaParser AST scanning and naming convention ({@code *Impl}).
      */
-    private Set<String> findImplementations(Set<String> changedClasses, Path projectDir) {
+    private Set<String> findImplementations(Set<String> changedClasses,
+                                            Set<String> allSourceFqns,
+                                            List<Path> sourceFiles) {
         Set<String> implementations = new LinkedHashSet<>();
 
-        // Build simple name lookup
-        Map<String, String> simpleNameToFqn = new HashMap<>();
+        Map<String, Set<String>> simpleNameToFqns = new HashMap<>();
         for (String fqn : changedClasses) {
-            simpleNameToFqn.put(SourceFileScanner.simpleClassName(fqn), fqn);
+            simpleNameToFqns.computeIfAbsent(SourceFileScanner.simpleClassName(fqn), k -> new HashSet<>()).add(fqn);
         }
 
         // 1. Naming convention: look for *Impl classes
-        Set<String> allSourceFqns = collectSourceFqns(projectDir);
         for (String suffix : config.implementationNaming()) {
             for (String fqn : changedClasses) {
                 String implSimpleName = SourceFileScanner.simpleClassName(fqn) + suffix;
@@ -96,7 +115,6 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         }
 
         // 2. AST scanning: find classes that extend/implement changed types
-        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
         JavaParser parser = new JavaParser();
 
         for (Path sourceFile : sourceFiles) {
@@ -111,7 +129,7 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                 for (ClassOrInterfaceDeclaration decl : declarations) {
                     // Check extends
                     for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
-                        if (simpleNameToFqn.containsKey(extended.getNameAsString())) {
+                        if (simpleNameToFqns.containsKey(extended.getNameAsString())) {
                             String implFqn = extractFqn(cu, decl);
                             if (implFqn != null) {
                                 implementations.add(implFqn);
@@ -121,7 +139,7 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                     }
                     // Check implements
                     for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
-                        if (simpleNameToFqn.containsKey(implemented.getNameAsString())) {
+                        if (simpleNameToFqns.containsKey(implemented.getNameAsString())) {
                             String implFqn = extractFqn(cu, decl);
                             if (implFqn != null) {
                                 implementations.add(implFqn);
