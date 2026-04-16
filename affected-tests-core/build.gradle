@@ -4,7 +4,7 @@ plugins {
 }
 
 dependencies {
-    api 'org.eclipse.jgit:org.eclipse.jgit:7.5.0.202512021534-r'
+    api 'org.eclipse.jgit:org.eclipse.jgit:7.6.0.202603022253-r'
     api 'com.github.javaparser:javaparser-core:3.28.0'
     implementation 'org.slf4j:slf4j-api:2.0.17'
     testImplementation 'org.slf4j:slf4j-simple:2.0.17'
