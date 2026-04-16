@@ -25,43 +25,53 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Extract version from build.gradle
-        id: version
-        run: |
-          VERSION=$(sed -n "s/.*version\s*=\s*'\([^']*\)'.*/\1/p" build.gradle | head -1)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Failed to extract version from build.gradle"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Check if tag already exists
+      - name: Check if already tagged
         id: tag_check
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if git describe --exact-match HEAD 2>/dev/null; then
+            echo "already_tagged=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "already_tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release (auto-increment patch, tag, push)
+        if: steps.tag_check.outputs.already_tagged == 'false'
+        run: ./gradlew release -Prelease.pushTagsOnly -Prelease.customUsername=${{ github.actor }} -Prelease.customPassword=${{ github.token }}
+
+      - name: Get released version
+        id: released
+        run: |
+          TAG=$(git describe --tags --abbrev=0)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version is release-quality
+        run: |
+          VERSION="${{ steps.released.outputs.version }}"
+          if [[ "$VERSION" == *"-alpha"* || "$VERSION" == *"-SNAPSHOT"* ]]; then
+            echo "::error::Unexpected version '$VERSION' — aborting publish"
+            exit 1
           fi
 
       - name: Build
-        if: steps.tag_check.outputs.exists == 'false'
         run: ./gradlew clean build
 
       - name: Publish to Gradle Plugin Portal
-        if: steps.tag_check.outputs.exists == 'false'
         env:
           GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
           GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
         run: ./gradlew publishPlugins
 
       - name: Create GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --generate-notes \
-            --target master
+          TAG="${{ steps.released.outputs.tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --target ${{ github.ref_name }}
+          else
+            echo "GitHub Release $TAG already exists — skipping"
+          fi

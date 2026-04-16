@@ -1,10 +1,30 @@
 plugins {
     id 'java'
+    id 'pl.allegro.tech.build.axion-release' version '1.21.1'
+}
+
+scmVersion {
+    tag {
+        prefix.set("v")
+    }
+    checks {
+        uncommittedChanges.set(false)
+    }
+    versionCreator { version, position ->
+        if (position.branch != 'master' && position.branch != 'main' && !position.branch.startsWith('HEAD')) {
+            return version + "-alpha"
+        }
+        return version
+    }
+    snapshotCreator { version, position ->
+        if (position.branch == 'master' || position.branch == 'main') return "-SNAPSHOT"
+        return ""
+    }
 }
 
 allprojects {
     group = 'io.affectedtests'
-    version = '1.9.0'
+    version = scmVersion.version
 
     repositories {
         mavenCentral()

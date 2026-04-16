@@ -11,9 +11,11 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '1.9.0'
+    id 'io.affectedtests' version '<latest>'
 }
 ```
+
+> Check [Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.affectedtests) for the latest version.
 
 ### 2. Run affected tests
 
@@ -183,6 +185,19 @@ affected-tests/
 - **JGit** — Git change detection (no native git binary required)
 - **JavaParser** — Source-level test discovery (usage + implementation strategies)
 - **SLF4J** — Logging
+
+## Versioning
+
+Versions are managed automatically via [axion-release](https://github.com/allegro/axion-release-plugin) — derived from git tags, never hardcoded in source.
+
+| Goal | Command |
+|------|---------|
+| Check current version | `./gradlew currentVersion` |
+| Auto patch release | Just merge to master (CI does it) |
+| Force minor bump next | `./gradlew markNextVersion -Prelease.version=X.Y.0` |
+| Force major bump next | `./gradlew markNextVersion -Prelease.version=X.0.0` |
+| Manual release | `./gradlew release` |
+| Release as RC | `./gradlew release -Prelease.versionIncrementer=incrementPrerelease` |
 
 ## License
 
