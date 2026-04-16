@@ -1,7 +1,7 @@
 plugins {
     id 'java-gradle-plugin'
     id 'maven-publish'
-    id 'com.gradle.plugin-publish' version '2.0.0'
+    id 'com.gradle.plugin-publish' version '2.1.1'
     id 'com.gradleup.shadow' version '9.3.1'
 }
 
@@ -80,6 +80,28 @@ publishing {
     publications {
         pluginMaven(MavenPublication) {
             artifactId = 'affected-tests-gradle'
+            pom {
+                name = 'Affected Tests Gradle Plugin'
+                description = 'Detects changes in the current branch and runs only the tests relevant to those changes.'
+                url = 'https://github.com/vedanthvdev/affected-tests'
+                licenses {
+                    license {
+                        name = 'Apache License 2.0'
+                        url = 'https://www.apache.org/licenses/LICENSE-2.0'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'vedanthvdev'
+                        name = 'Vedanth Vasudev'
+                        url = 'https://github.com/vedanthvdev'
+                    }
+                }
+                scm {
+                    url = 'https://github.com/vedanthvdev/affected-tests'
+                    connection = 'scm:git:https://github.com/vedanthvdev/affected-tests.git'
+                }
+            }
         }
     }
 }

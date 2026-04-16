@@ -41,6 +41,10 @@ import java.util.regex.Pattern;
  */
 public abstract class AffectedTestTask extends DefaultTask {
 
+    public AffectedTestTask() {
+        notCompatibleWithConfigurationCache("Reads live git state and scans the file system at execution time");
+    }
+
     /**
      * Git base ref to diff against.
      *
