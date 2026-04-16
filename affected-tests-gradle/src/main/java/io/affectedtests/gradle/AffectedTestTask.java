@@ -256,8 +256,7 @@ public abstract class AffectedTestTask extends DefaultTask {
         if (gradlew.exists() && gradlew.canExecute()) {
             return gradlew.getAbsolutePath();
         }
-        // Return bare command name — let the OS resolve it via PATH
-        return wrapperName.replace(".bat", "");
+        return isWindows() ? "gradle.bat" : "gradle";
     }
 
     private static boolean isWindows() {

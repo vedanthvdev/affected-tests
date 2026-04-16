@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.FileSystems;
 import java.nio.file.PathMatcher;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -18,9 +19,13 @@ public final class PathToClassMapper {
     private static final Logger log = LoggerFactory.getLogger(PathToClassMapper.class);
 
     private final AffectedTestsConfig config;
+    private final List<PathMatcher> excludeMatchers;
 
     public PathToClassMapper(AffectedTestsConfig config) {
         this.config = config;
+        this.excludeMatchers = config.excludePaths().stream()
+                .map(p -> FileSystems.getDefault().getPathMatcher("glob:" + p))
+                .toList();
     }
 
     /**
@@ -146,9 +151,9 @@ public final class PathToClassMapper {
     }
 
     private boolean isExcluded(String filePath) {
-        for (String pattern : config.excludePaths()) {
-            PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
-            if (matcher.matches(java.nio.file.Path.of(filePath))) {
+        java.nio.file.Path path = java.nio.file.Path.of(filePath);
+        for (PathMatcher matcher : excludeMatchers) {
+            if (matcher.matches(path)) {
                 return true;
             }
         }

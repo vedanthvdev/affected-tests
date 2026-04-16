@@ -98,6 +98,24 @@ class AffectedTestsConfigTest {
     }
 
     @Test
+    void builderRejectsNullCollections() {
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().strategies(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().testSuffixes(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().sourceDirs(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().testDirs(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().excludePaths(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().implementationNaming(null).build());
+        assertThrows(NullPointerException.class, () ->
+                AffectedTestsConfig.builder().testProjectMapping(null).build());
+    }
+
+    @Test
     void configIsImmutable() {
         AffectedTestsConfig config = AffectedTestsConfig.builder().build();
 

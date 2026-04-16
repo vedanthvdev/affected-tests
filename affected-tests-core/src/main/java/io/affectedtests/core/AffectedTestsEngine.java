@@ -100,19 +100,23 @@ public final class AffectedTestsEngine {
         Set<Path> searchDirs = resolveTestSearchDirs(changedFiles, mapper);
         log.info("Test search directories: {}", searchDirs);
 
-        // Run strategies against each search directory
+        // Run strategies against each search directory, building a cached index per dir
+        Map<Path, ProjectIndex> indexCache = new HashMap<>();
         for (Path searchDir : searchDirs) {
+            ProjectIndex index = indexCache.computeIfAbsent(searchDir,
+                    dir -> ProjectIndex.build(dir, config));
+
             if (config.strategies().contains("naming")) {
-                allTestsToRun.addAll(namingStrategy.discoverTests(productionClasses, searchDir));
+                allTestsToRun.addAll(namingStrategy.discoverTests(productionClasses, index));
             }
             if (config.strategies().contains("usage")) {
-                allTestsToRun.addAll(usageStrategy.discoverTests(productionClasses, searchDir));
+                allTestsToRun.addAll(usageStrategy.discoverTests(productionClasses, index));
             }
             if (config.strategies().contains("impl")) {
-                allTestsToRun.addAll(implStrategy.discoverTests(productionClasses, searchDir));
+                allTestsToRun.addAll(implStrategy.discoverTests(productionClasses, index));
             }
             if (config.transitiveDepth() > 0) {
-                allTestsToRun.addAll(transitiveStrategy.discoverTests(productionClasses, searchDir));
+                allTestsToRun.addAll(transitiveStrategy.discoverTests(productionClasses, index));
             }
         }
 

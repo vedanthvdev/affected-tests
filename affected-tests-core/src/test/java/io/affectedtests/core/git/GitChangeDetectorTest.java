@@ -118,6 +118,34 @@ class GitChangeDetectorTest {
     }
 
     @Test
+    void detectsUncommittedChanges() throws Exception {
+        try (Git git = initRepoWithInitialCommit()) {
+            String baseCommit = git.log().call().iterator().next().getName();
+
+            // Create and track a file, then modify it without staging
+            File javaFile = tempDir.resolve("Tracked.java").toFile();
+            Files.writeString(javaFile.toPath(), "class Tracked {}");
+            git.add().addFilepattern("Tracked.java").call();
+            git.commit().setMessage("add Tracked").call();
+
+            // Modify without staging
+            Files.writeString(javaFile.toPath(), "class Tracked { int x; }");
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(baseCommit)
+                    .includeUncommitted(true)
+                    .includeStaged(false)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+            Set<String> changed = detector.detectChangedFiles();
+
+            assertTrue(changed.contains("Tracked.java"),
+                    "Should detect the unstaged modification");
+        }
+    }
+
+    @Test
     void failsLoudlyOnNonGitDirectory() {
         Path nonGitDir = tempDir.resolve("not-a-repo");
         nonGitDir.toFile().mkdirs();

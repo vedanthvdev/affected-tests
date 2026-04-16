@@ -2,6 +2,7 @@ package io.affectedtests.core.config;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -92,15 +93,36 @@ public final class AffectedTestsConfig {
         public Builder includeUncommitted(boolean v) { this.includeUncommitted = v; return this; }
         public Builder includeStaged(boolean v) { this.includeStaged = v; return this; }
         public Builder runAllIfNoMatches(boolean v) { this.runAllIfNoMatches = v; return this; }
-        public Builder strategies(Set<String> v) { this.strategies = v; return this; }
+        public Builder strategies(Set<String> v) {
+            this.strategies = Objects.requireNonNull(v, "strategies must not be null");
+            return this;
+        }
         public Builder transitiveDepth(int v) { this.transitiveDepth = Math.max(0, Math.min(v, 5)); return this; }
-        public Builder testSuffixes(List<String> v) { this.testSuffixes = v; return this; }
-        public Builder sourceDirs(List<String> v) { this.sourceDirs = v; return this; }
-        public Builder testDirs(List<String> v) { this.testDirs = v; return this; }
-        public Builder excludePaths(List<String> v) { this.excludePaths = v; return this; }
+        public Builder testSuffixes(List<String> v) {
+            this.testSuffixes = Objects.requireNonNull(v, "testSuffixes must not be null");
+            return this;
+        }
+        public Builder sourceDirs(List<String> v) {
+            this.sourceDirs = Objects.requireNonNull(v, "sourceDirs must not be null");
+            return this;
+        }
+        public Builder testDirs(List<String> v) {
+            this.testDirs = Objects.requireNonNull(v, "testDirs must not be null");
+            return this;
+        }
+        public Builder excludePaths(List<String> v) {
+            this.excludePaths = Objects.requireNonNull(v, "excludePaths must not be null");
+            return this;
+        }
         public Builder includeImplementationTests(boolean v) { this.includeImplementationTests = v; return this; }
-        public Builder implementationNaming(List<String> v) { this.implementationNaming = v; return this; }
-        public Builder testProjectMapping(Map<String, String> v) { this.testProjectMapping = v; return this; }
+        public Builder implementationNaming(List<String> v) {
+            this.implementationNaming = Objects.requireNonNull(v, "implementationNaming must not be null");
+            return this;
+        }
+        public Builder testProjectMapping(Map<String, String> v) {
+            this.testProjectMapping = Objects.requireNonNull(v, "testProjectMapping must not be null");
+            return this;
+        }
 
         public AffectedTestsConfig build() {
             return new AffectedTestsConfig(this);

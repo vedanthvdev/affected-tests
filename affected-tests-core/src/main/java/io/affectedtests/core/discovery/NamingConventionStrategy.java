@@ -31,9 +31,20 @@ public final class NamingConventionStrategy implements TestDiscoveryStrategy {
 
     @Override
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
+        Set<String> allTestFqns = SourceFileScanner.scanTestFqns(projectDir, config.testDirs());
+        return matchTests(changedProductionClasses, allTestFqns);
+    }
+
+    /**
+     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     */
+    public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
+        return matchTests(changedProductionClasses, index.testFqns());
+    }
+
+    private Set<String> matchTests(Set<String> changedProductionClasses, Set<String> allTestFqns) {
         Set<String> discoveredTests = new LinkedHashSet<>();
 
-        // Build a map of simple class name → set of expected test simple names
         Map<String, Set<String>> expectedTestNames = new HashMap<>();
         for (String fqn : changedProductionClasses) {
             String simpleName = SourceFileScanner.simpleClassName(fqn);
@@ -43,9 +54,6 @@ public final class NamingConventionStrategy implements TestDiscoveryStrategy {
             }
             expectedTestNames.put(fqn, candidates);
         }
-
-        // Scan test directories for matching files
-        Set<String> allTestFqns = SourceFileScanner.scanTestFqns(projectDir, config.testDirs());
 
         for (String testFqn : allTestFqns) {
             String testSimpleName = SourceFileScanner.simpleClassName(testFqn);
