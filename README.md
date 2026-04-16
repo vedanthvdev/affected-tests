@@ -2,7 +2,7 @@
 
 A Gradle plugin that detects changes in the current branch and runs only the unit and integration tests relevant to those changes. No seed run required — it works immediately.
 
-**Target stack:** Gradle 9+, Spring Boot 4+, Java 21+, JUnit 5
+**Target stack:** Gradle 8+ (primary support: 9.x), Java 21+, JUnit 5
 
 ## Quick Start
 
@@ -175,10 +175,10 @@ affected-tests/
 
 | Component | Version |
 |-----------|---------|
-| Gradle | 9.x (primary), 8.x (best-effort) |
-| Java | 21+ (including 25) |
+| Gradle | 8.x+, primary support on 9.x |
+| Java | 21+ |
 | JUnit | 5.x |
-| Spring Boot | 4.x (compatible, no Boot-specific code) |
+| Spring Boot | Compatible (no Boot-specific code) |
 
 ## Dependencies
 

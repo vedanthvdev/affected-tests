@@ -1,6 +1,5 @@
 plugins {
     id 'java-gradle-plugin'
-    id 'maven-publish'
     id 'com.gradle.plugin-publish' version '2.1.1'
     id 'com.gradleup.shadow' version '9.3.1'
 }
@@ -71,7 +70,7 @@ gradlePlugin {
             implementationClass = 'io.affectedtests.gradle.AffectedTestsPlugin'
             displayName = 'Affected Tests Plugin'
             description = 'Detects changes in the current branch and runs only the tests relevant to those changes. Zero config, CI-friendly, multi-module support.'
-            tags.set(['testing', 'affected-tests', 'ci', 'git', 'junit', 'spring-boot', 'test-selection'])
+            tags.set(['testing', 'affected-tests', 'ci', 'git', 'junit', 'test-selection'])
         }
     }
 }
@@ -100,6 +99,7 @@ publishing {
                 scm {
                     url = 'https://github.com/vedanthvdev/affected-tests'
                     connection = 'scm:git:https://github.com/vedanthvdev/affected-tests.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/vedanthvdev/affected-tests.git'
                 }
             }
         }
