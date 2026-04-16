@@ -3,7 +3,6 @@ package io.affectedtests.core.config;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -18,7 +17,7 @@ class AffectedTestsConfigTest {
         assertTrue(config.includeUncommitted());
         assertTrue(config.includeStaged());
         assertFalse(config.runAllIfNoMatches());
-        assertEquals(Set.of("naming", "usage", "impl"), config.strategies());
+        assertEquals(Set.of("naming", "usage", "impl", "transitive"), config.strategies());
         assertEquals(2, config.transitiveDepth());
         assertEquals(List.of("Test", "IT", "ITTest", "IntegrationTest"), config.testSuffixes());
         assertEquals(List.of("src/main/java"), config.sourceDirs());
@@ -26,7 +25,6 @@ class AffectedTestsConfigTest {
         assertEquals(List.of("**/generated/**"), config.excludePaths());
         assertTrue(config.includeImplementationTests());
         assertEquals(List.of("Impl"), config.implementationNaming());
-        assertTrue(config.testProjectMapping().isEmpty());
     }
 
     @Test
@@ -44,7 +42,6 @@ class AffectedTestsConfigTest {
                 .excludePaths(List.of("**/generated/**", "**/*Dto.java"))
                 .includeImplementationTests(false)
                 .implementationNaming(List.of("Impl", "Default"))
-                .testProjectMapping(Map.of(":api", ":application"))
                 .build();
 
         assertEquals("origin/main", config.baseRef());
@@ -59,7 +56,6 @@ class AffectedTestsConfigTest {
         assertEquals(2, config.excludePaths().size());
         assertFalse(config.includeImplementationTests());
         assertEquals(2, config.implementationNaming().size());
-        assertEquals(":application", config.testProjectMapping().get(":api"));
     }
 
     @Test
@@ -89,7 +85,6 @@ class AffectedTestsConfigTest {
 
     @Test
     void baseRefAllowsValidRefs() {
-        // These should all be fine
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/master").build());
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/main").build());
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("abc123def456").build());
@@ -111,8 +106,6 @@ class AffectedTestsConfigTest {
                 AffectedTestsConfig.builder().excludePaths(null).build());
         assertThrows(NullPointerException.class, () ->
                 AffectedTestsConfig.builder().implementationNaming(null).build());
-        assertThrows(NullPointerException.class, () ->
-                AffectedTestsConfig.builder().testProjectMapping(null).build());
     }
 
     @Test

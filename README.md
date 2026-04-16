@@ -26,7 +26,7 @@ plugins {
 That's it. With zero config, the plugin will:
 - Diff against `origin/master`
 - Include uncommitted and staged changes
-- Use naming, usage, and implementation strategies to discover affected tests
+- Use naming, usage, implementation, and transitive strategies to discover affected tests
 - Follow 2 levels of transitive dependencies
 
 ## CI Integration
@@ -61,10 +61,11 @@ affectedTests {
     // Run full suite if no matches found (default: false)
     runAllIfNoMatches = false
 
-    // Discovery strategies: "naming", "usage", "impl" (default: all three)
-    strategies = ["naming", "usage", "impl"]
+    // Discovery strategies: "naming", "usage", "impl", "transitive" (default: all four)
+    strategies = ["naming", "usage", "impl", "transitive"]
 
-    // Transitive dependency depth (default: 2, max: 5, 0 = disabled)
+    // Transitive dependency depth — used when the "transitive" strategy is enabled
+    // (default: 2, max: 5, 0 = disabled)
     transitiveDepth = 2
 
     // Test class suffixes (default: ["Test", "IT", "ITTest", "IntegrationTest"])
@@ -84,9 +85,6 @@ affectedTests {
 
     // Implementation naming suffixes (default: ["Impl"])
     implementationNaming = ["Impl"]
-
-    // Multi-module: map source project to test project
-    testProjectMapping = [":api": ":application"]
 }
 ```
 
@@ -136,20 +134,16 @@ Any test file that is itself modified in the diff is **always** included in the 
 
 ## Multi-Module Support
 
-The plugin works out of the box with multi-module projects — it recursively scans all modules at any nesting depth. No configuration is needed for the common case.
+The plugin works out of the box with multi-module projects — it recursively scans all modules at any nesting depth, so no configuration is needed.
 
-For projects where tests for one module live in a **different** module (e.g. `api` classes are tested in `application`), you can add an explicit mapping:
+Internally, each discovered test FQN is traced back to the Gradle subproject that owns its file, and tests are then dispatched per module:
 
-```groovy
-affectedTests {
-    testProjectMapping = [
-        ":api": ":application",       // api tests live in application module
-        ":domain": ":application"     // domain tests also live in application
-    ]
-}
+```
+./gradlew :moduleA:test --tests com.example.FooTest \
+          :moduleB:test --tests com.example.BarTest
 ```
 
-When a class in `:api` changes, the plugin will search for affected tests in both the root project and the `:application` module. This ensures cross-module imports (e.g. a test in `application` that imports a class from `api`) are detected correctly.
+This makes `--tests` filters scope cleanly to their owning module, instead of being applied globally and failing on any subproject that doesn't happen to contain the FQN. Cross-module imports (e.g. a test in `application` that imports a class from `api`) are still detected correctly via the `usage` and `impl` strategies.
 
 ## Fallback Behavior
 

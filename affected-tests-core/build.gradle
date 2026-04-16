@@ -1,20 +1,13 @@
 plugins {
     id 'java-library'
-    id 'maven-publish'
 }
 
 dependencies {
-    api 'org.eclipse.jgit:org.eclipse.jgit:7.6.0.202603022253-r'
-    api 'com.github.javaparser:javaparser-core:3.28.0'
+    // Nothing in the public API surface of this module exposes JGit or
+    // JavaParser types, so these are implementation-only. The plugin module
+    // shades them into the published JAR anyway.
+    implementation 'org.eclipse.jgit:org.eclipse.jgit:7.6.0.202603022253-r'
+    implementation 'com.github.javaparser:javaparser-core:3.28.0'
     implementation 'org.slf4j:slf4j-api:2.0.17'
     testImplementation 'org.slf4j:slf4j-simple:2.0.17'
-}
-
-publishing {
-    publications {
-        mavenJava(MavenPublication) {
-            from components.java
-            artifactId = 'affected-tests-core'
-        }
-    }
 }

@@ -24,29 +24,21 @@ import java.util.regex.Pattern;
  * <p>Scans test source files for references to changed production classes.
  * Uses a two-tier approach:
  * <ol>
- *   <li><strong>Import matching (primary):</strong> If a test file directly imports the
- *       changed class FQN, it is considered affected. This catches all usage patterns:
- *       fields, method parameters, local variables, constructor args, type casts, etc.</li>
- *   <li><strong>Type reference scanning (secondary):</strong> For same-package and wildcard
+ *   <li><strong>Import matching (primary):</strong> if a test file directly imports the
+ *       changed class FQN, it is considered affected.</li>
+ *   <li><strong>Type reference scanning (secondary):</strong> for same-package and wildcard
  *       import cases, scans for the simple name in field declarations, method parameters,
  *       constructor instantiations, and type references.</li>
  * </ol>
- *
- * <p>Examples it catches:
- * <ul>
- *   <li>{@code import com.example.FooService;} (any usage in the file)</li>
- *   <li>{@code private FooBar underTest;}</li>
- *   <li>{@code @Autowired private FooBar fooBar;}</li>
- *   <li>{@code @Mock private FooBar fooBar;}</li>
- *   <li>{@code public void test(FooBar param) {...}}</li>
- *   <li>{@code new FooBar(...)}</li>
- * </ul>
  */
 public final class UsageStrategy implements TestDiscoveryStrategy {
 
     private static final Logger log = LoggerFactory.getLogger(UsageStrategy.class);
 
     private final AffectedTestsConfig config;
+    // Patterns are derived from simple class names; cache avoids recompiling on
+    // every AST-walk iteration (hot path called per file × per changed class).
+    private final Map<String, Pattern> patternCache = new HashMap<>();
 
     public UsageStrategy(AffectedTestsConfig config) {
         this.config = config;
@@ -60,17 +52,19 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
     @Override
     public Set<String> discoverTests(Set<String> changedProductionClasses, Path projectDir) {
         List<Path> testFiles = SourceFileScanner.collectTestFiles(projectDir, config.testDirs());
-        return scanTestFiles(changedProductionClasses, testFiles);
+        return scanTestFiles(changedProductionClasses, testFiles, null);
     }
 
     /**
-     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     * Discovers tests using a pre-built project index (avoids redundant file walks
+     * and AST parses).
      */
     public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
-        return scanTestFiles(changedProductionClasses, index.testFiles());
+        return scanTestFiles(changedProductionClasses, index.testFiles(), index);
     }
 
-    private Set<String> scanTestFiles(Set<String> changedProductionClasses, List<Path> testFiles) {
+    private Set<String> scanTestFiles(Set<String> changedProductionClasses,
+                                      List<Path> testFiles, ProjectIndex index) {
         Set<String> discoveredTests = new LinkedHashSet<>();
 
         if (changedProductionClasses.isEmpty()) {
@@ -86,34 +80,41 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             simpleNames.add(simpleName);
         }
 
-        JavaParser parser = new JavaParser();
+        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
 
         for (Path testFile : testFiles) {
-            try {
-                ParseResult<CompilationUnit> result = parser.parse(testFile);
-                if (!result.isSuccessful() || result.getResult().isEmpty()) {
-                    log.debug("Failed to parse {}", testFile);
-                    continue;
-                }
+            CompilationUnit cu = parseOrGet(testFile, index, fallbackParser);
+            if (cu == null) continue;
 
-                CompilationUnit cu = result.getResult().get();
-                String testFqn = extractFqn(cu, testFile);
-                if (testFqn == null) continue;
+            String testFqn = extractFqn(cu, testFile);
+            if (testFqn == null) continue;
 
-                if (changedFqns.contains(testFqn)) continue;
+            if (changedFqns.contains(testFqn)) continue;
 
-                if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqns)) {
-                    discoveredTests.add(testFqn);
-                    log.debug("Usage match: {}", testFqn);
-                }
-            } catch (Exception e) {
-                log.debug("Error parsing test file {}: {}", testFile, e.getMessage());
+            if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqns)) {
+                discoveredTests.add(testFqn);
+                log.debug("Usage match: {}", testFqn);
             }
         }
 
         log.info("[usage] Discovered {} tests for {} changed classes",
                 discoveredTests.size(), changedProductionClasses.size());
         return discoveredTests;
+    }
+
+    private CompilationUnit parseOrGet(Path file, ProjectIndex index, JavaParser fallbackParser) {
+        if (index != null) {
+            return index.compilationUnit(file);
+        }
+        try {
+            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
+            if (result.isSuccessful() && result.getResult().isPresent()) {
+                return result.getResult().get();
+            }
+        } catch (Exception e) {
+            log.debug("Error parsing {}: {}", file, e.getMessage());
+        }
+        return null;
     }
 
     /**
@@ -124,7 +125,6 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
                                                Set<String> changedFqns,
                                                Set<String> simpleNames,
                                                Map<String, Set<String>> simpleNameToFqns) {
-        // Collect imports
         Set<String> importedFqns = new HashSet<>();
         Set<String> wildcardPackages = new HashSet<>();
         for (ImportDeclaration imp : cu.getImports()) {
@@ -135,7 +135,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // --- Tier 1: Direct import match ---
+        // Tier 1: Direct import match
         for (String changedFqn : changedFqns) {
             if (importedFqns.contains(changedFqn)) {
                 log.debug("  Direct import match: {}", changedFqn);
@@ -143,7 +143,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // --- Tier 1b: Wildcard import match ---
+        // Tier 1b: Wildcard import match
         for (String changedFqn : changedFqns) {
             String pkg = SourceFileScanner.packageOf(changedFqn);
             if (wildcardPackages.contains(pkg)) {
@@ -155,7 +155,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // --- Tier 2: Same-package (no import needed) ---
+        // Tier 2: Same-package (no import needed)
         String testPackage = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
@@ -175,31 +175,25 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
 
     /**
      * Checks whether the given simple type name appears in the AST as a type reference.
-     * Scans fields, method parameters, constructor instantiations, and all type references.
      */
     private boolean typeNameAppearsInAst(CompilationUnit cu, String simpleName) {
-        // Check field declarations
         for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
             for (VariableDeclarator var : field.getVariables()) {
                 if (typeMatches(var.getTypeAsString(), simpleName)) return true;
             }
         }
 
-        // Check method parameters
         for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
             for (Parameter param : method.getParameters()) {
                 if (typeMatches(param.getTypeAsString(), simpleName)) return true;
             }
-            // Check return type
             if (typeMatches(method.getTypeAsString(), simpleName)) return true;
         }
 
-        // Check constructor calls: new FooBar(...)
         for (ObjectCreationExpr expr : cu.findAll(ObjectCreationExpr.class)) {
             if (typeMatches(expr.getTypeAsString(), simpleName)) return true;
         }
 
-        // Check all ClassOrInterfaceType nodes (catches generics, casts, etc.)
         for (ClassOrInterfaceType type : cu.findAll(ClassOrInterfaceType.class)) {
             if (type.getNameAsString().equals(simpleName)) return true;
         }
@@ -213,7 +207,8 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
      */
     private boolean typeMatches(String typeString, String simpleName) {
         if (typeString.equals(simpleName)) return true;
-        Pattern pattern = Pattern.compile("(?<![a-zA-Z0-9_])" + Pattern.quote(simpleName) + "(?![a-zA-Z0-9_])");
+        Pattern pattern = patternCache.computeIfAbsent(simpleName,
+                n -> Pattern.compile("(?<![a-zA-Z0-9_])" + Pattern.quote(n) + "(?![a-zA-Z0-9_])"));
         return pattern.matcher(typeString).find();
     }
 

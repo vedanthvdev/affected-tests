@@ -20,9 +20,16 @@ public final class SourceFileScanner {
 
     private static final Logger log = LoggerFactory.getLogger(SourceFileScanner.class);
 
-    /** Directories that should never be descended into when searching for modules. */
+    /**
+     * Directories that should never be descended into when searching for modules.
+     * Covers Gradle/Maven build output, IDE metadata, VCS, and common tooling
+     * caches from Node, Python and JS test runners that may coexist in the repo.
+     */
     private static final Set<String> SKIP_DIRS = Set.of(
-            ".git", ".gradle", ".idea", "build", "out", "node_modules", ".cursor"
+            ".git", ".gradle", ".idea", ".vscode", ".cursor",
+            "build", "out", "target",
+            "node_modules", "dist", "coverage", ".nx",
+            "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox"
     );
 
     private SourceFileScanner() {
@@ -69,14 +76,6 @@ public final class SourceFileScanner {
      * Collects all production Java files from the given source directories,
      * scanning the entire project tree at any depth.
      *
-     * <p>For example, with {@code sourceDirs = ["src/main/java"]}, this finds
-     * Java files under:
-     * <ul>
-     *   <li>{@code root/src/main/java/}</li>
-     *   <li>{@code root/api/src/main/java/}</li>
-     *   <li>{@code root/services/payment/src/main/java/}</li>
-     * </ul>
-     *
      * @param projectDir the root project directory
      * @param sourceDirs source directory suffixes (e.g. {@code ["src/main/java"]})
      * @return list of Java source files
@@ -115,21 +114,28 @@ public final class SourceFileScanner {
 
     /**
      * Scans all configured test directories and returns the FQNs of every
-     * {@code .java} file found. Handles root-level, flat, and deeply nested
-     * module directories.
+     * {@code .java} file found.
+     */
+    public static Set<String> scanTestFqns(Path projectDir, List<String> testDirs) {
+        return scanTestFqnsWithFiles(projectDir, testDirs).keySet();
+    }
+
+    /**
+     * Scans all configured test directories and returns an ordered map of
+     * test class FQN to its absolute file path. Preserves discovery order.
      *
      * @param projectDir the root project directory
      * @param testDirs   test directory suffixes
-     * @return ordered set of test class FQNs
+     * @return ordered map of test class FQN to its absolute file path
      */
-    public static Set<String> scanTestFqns(Path projectDir, List<String> testDirs) {
-        Set<String> fqns = new LinkedHashSet<>();
+    public static LinkedHashMap<String, Path> scanTestFqnsWithFiles(Path projectDir, List<String> testDirs) {
+        LinkedHashMap<String, Path> result = new LinkedHashMap<>();
         for (String testDir : testDirs) {
             for (Path resolved : findAllMatchingDirs(projectDir, testDir)) {
-                fqns.addAll(fqnsUnder(resolved));
+                walkFqnsUnder(resolved, result);
             }
         }
-        return fqns;
+        return result;
     }
 
     // ── FQN helpers ─────────────────────────────────────────────────────
@@ -138,7 +144,12 @@ public final class SourceFileScanner {
      * Converts {@code .java} files under a source-root directory to FQNs.
      */
     public static Set<String> fqnsUnder(Path sourceRoot) {
-        Set<String> fqns = new LinkedHashSet<>();
+        LinkedHashMap<String, Path> result = new LinkedHashMap<>();
+        walkFqnsUnder(sourceRoot, result);
+        return result.keySet();
+    }
+
+    private static void walkFqnsUnder(Path sourceRoot, Map<String, Path> accumulator) {
         try {
             Files.walkFileTree(sourceRoot, new SimpleFileVisitor<>() {
                 @Override
@@ -151,7 +162,7 @@ public final class SourceFileScanner {
                         if (fqn.endsWith(".java")) {
                             fqn = fqn.substring(0, fqn.length() - 5);
                         }
-                        fqns.add(fqn);
+                        accumulator.putIfAbsent(fqn, file);
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -159,7 +170,6 @@ public final class SourceFileScanner {
         } catch (IOException e) {
             log.warn("Error scanning directory {}: {}", sourceRoot, e.getMessage());
         }
-        return fqns;
     }
 
     /**
@@ -232,12 +242,7 @@ public final class SourceFileScanner {
      * Recursively walks the project tree and returns every directory that
      * matches the given relative suffix (e.g. {@code "src/test/java"}).
      *
-     * <p>This replaces the old depth-1 sub-module scan. It finds modules at
-     * any nesting level — flat ({@code api/src/test/java}), nested
-     * ({@code services/payment/src/test/java}), or root ({@code src/test/java}).
-     *
-     * <p>Directories listed in {@link #SKIP_DIRS} are pruned during the walk
-     * to avoid scanning build output, VCS metadata, and other irrelevant trees.
+     * <p>Directories listed in {@link #SKIP_DIRS} are pruned during the walk.
      *
      * @param projectDir  the root project directory
      * @param relativeDir the directory suffix to look for (e.g. {@code "src/test/java"})
@@ -246,31 +251,24 @@ public final class SourceFileScanner {
     static List<Path> findAllMatchingDirs(Path projectDir, String relativeDir) {
         List<Path> matches = new ArrayList<>();
 
-        // Check the root itself first
         Path rootMatch = projectDir.resolve(relativeDir);
         if (Files.isDirectory(rootMatch)) {
             matches.add(rootMatch);
         }
 
-        // Walk the tree looking for sub-module directories that contain relativeDir
         try {
             Files.walkFileTree(projectDir, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                    // Skip irrelevant directories
                     String dirName = dir.getFileName() != null ? dir.getFileName().toString() : "";
                     if (SKIP_DIRS.contains(dirName)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
 
-                    // Don't re-check the root (already handled above)
                     if (dir.equals(projectDir)) {
                         return FileVisitResult.CONTINUE;
                     }
 
-                    // Check if this directory, when combined with relativeDir, yields an
-                    // existing directory. If so, record it and skip descending further into
-                    // the matched source tree (its contents are Java packages, not modules).
                     Path candidate = dir.resolve(relativeDir);
                     if (Files.isDirectory(candidate)) {
                         matches.add(candidate);

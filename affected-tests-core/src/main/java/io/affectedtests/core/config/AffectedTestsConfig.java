@@ -1,7 +1,6 @@
 package io.affectedtests.core.config;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -10,6 +9,12 @@ import java.util.Set;
  * Immutable value object — use the {@link Builder} to construct.
  */
 public final class AffectedTestsConfig {
+
+    /** The built-in discovery strategy names. */
+    public static final String STRATEGY_NAMING = "naming";
+    public static final String STRATEGY_USAGE = "usage";
+    public static final String STRATEGY_IMPL = "impl";
+    public static final String STRATEGY_TRANSITIVE = "transitive";
 
     private final String baseRef;
     private final boolean includeUncommitted;
@@ -23,7 +28,6 @@ public final class AffectedTestsConfig {
     private final List<String> excludePaths;
     private final boolean includeImplementationTests;
     private final List<String> implementationNaming;
-    private final Map<String, String> testProjectMapping;
 
     private AffectedTestsConfig(Builder builder) {
         this.baseRef = builder.baseRef;
@@ -38,7 +42,6 @@ public final class AffectedTestsConfig {
         this.excludePaths = List.copyOf(builder.excludePaths);
         this.includeImplementationTests = builder.includeImplementationTests;
         this.implementationNaming = List.copyOf(builder.implementationNaming);
-        this.testProjectMapping = Map.copyOf(builder.testProjectMapping);
     }
 
     public String baseRef() { return baseRef; }
@@ -53,7 +56,6 @@ public final class AffectedTestsConfig {
     public List<String> excludePaths() { return excludePaths; }
     public boolean includeImplementationTests() { return includeImplementationTests; }
     public List<String> implementationNaming() { return implementationNaming; }
-    public Map<String, String> testProjectMapping() { return testProjectMapping; }
 
     /** Creates a builder with sensible defaults. */
     public static Builder builder() {
@@ -65,7 +67,7 @@ public final class AffectedTestsConfig {
         private boolean includeUncommitted = true;
         private boolean includeStaged = true;
         private boolean runAllIfNoMatches = false;
-        private Set<String> strategies = Set.of("naming", "usage", "impl");
+        private Set<String> strategies = Set.of(STRATEGY_NAMING, STRATEGY_USAGE, STRATEGY_IMPL, STRATEGY_TRANSITIVE);
         private int transitiveDepth = 2;
         private List<String> testSuffixes = List.of("Test", "IT", "ITTest", "IntegrationTest");
         private List<String> sourceDirs = List.of("src/main/java");
@@ -73,7 +75,6 @@ public final class AffectedTestsConfig {
         private List<String> excludePaths = List.of("**/generated/**");
         private boolean includeImplementationTests = true;
         private List<String> implementationNaming = List.of("Impl");
-        private Map<String, String> testProjectMapping = Map.of();
 
         public Builder baseRef(String baseRef) {
             if (baseRef == null || baseRef.isBlank()) {
@@ -117,10 +118,6 @@ public final class AffectedTestsConfig {
         public Builder includeImplementationTests(boolean v) { this.includeImplementationTests = v; return this; }
         public Builder implementationNaming(List<String> v) {
             this.implementationNaming = Objects.requireNonNull(v, "implementationNaming must not be null");
-            return this;
-        }
-        public Builder testProjectMapping(Map<String, String> v) {
-            this.testProjectMapping = Objects.requireNonNull(v, "testProjectMapping must not be null");
             return this;
         }
 

@@ -2,7 +2,10 @@ package io.affectedtests.gradle;
 
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
+import org.gradle.api.file.Directory;
 
+import java.io.File;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -16,11 +19,9 @@ public class AffectedTestsPlugin implements Plugin<Project> {
 
     @Override
     public void apply(Project project) {
-        // Register extension with defaults
         AffectedTestsExtension extension = project.getExtensions()
                 .create("affectedTests", AffectedTestsExtension.class);
 
-        // Set conventions (defaults) — these use the Provider API so they're lazy
         extension.getBaseRef().convention(
                 project.getProviders().gradleProperty("affectedTestsBaseRef")
                         .orElse("origin/master")
@@ -28,7 +29,7 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         extension.getIncludeUncommitted().convention(true);
         extension.getIncludeStaged().convention(true);
         extension.getRunAllIfNoMatches().convention(false);
-        extension.getStrategies().convention(List.of("naming", "usage", "impl"));
+        extension.getStrategies().convention(List.of("naming", "usage", "impl", "transitive"));
         extension.getTransitiveDepth().convention(2);
         extension.getTestSuffixes().convention(List.of("Test", "IT", "ITTest", "IntegrationTest"));
         extension.getSourceDirs().convention(List.of("src/main/java"));
@@ -36,14 +37,14 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         extension.getExcludePaths().convention(List.of("**/generated/**"));
         extension.getIncludeImplementationTests().convention(true);
         extension.getImplementationNaming().convention(List.of("Impl"));
-        extension.getTestProjectMapping().convention(Map.of());
 
-        // Register the affectedTest task lazily
+        Project rootProject = project.getRootProject();
+        Directory rootDir = rootProject.getLayout().getProjectDirectory();
+
         project.getTasks().register("affectedTest", AffectedTestTask.class, task -> {
             task.setGroup("verification");
             task.setDescription("Runs only the tests affected by changes in the current branch.");
 
-            // Wire extension properties to task inputs
             task.getBaseRef().set(extension.getBaseRef());
             task.getIncludeUncommitted().set(extension.getIncludeUncommitted());
             task.getIncludeStaged().set(extension.getIncludeStaged());
@@ -56,10 +57,38 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getExcludePaths().set(extension.getExcludePaths());
             task.getIncludeImplementationTests().set(extension.getIncludeImplementationTests());
             task.getImplementationNaming().set(extension.getImplementationNaming());
-            task.getTestProjectMapping().set(extension.getTestProjectMapping());
 
-            // Wire rootDir at configuration time (safe for config cache)
-            task.getRootDir().set(project.getRootProject().getLayout().getProjectDirectory());
+            task.getRootDir().set(rootDir);
+            task.getSubprojectPaths().set(project.provider(() -> collectSubprojectPaths(rootProject)));
+
+            // Ensure test classes are compiled before the nested gradle invocation
+            // runs. Without this, a fresh CI checkout would have nothing to test
+            // and Gradle would fail with "No tests found for given includes".
+            rootProject.allprojects(p -> p.getPluginManager().withPlugin("java", unused ->
+                    task.dependsOn(p.getTasks().named("testClasses"))));
         });
+    }
+
+    /**
+     * Returns a map of relative-path-from-root-project-dir (empty string for the
+     * root project itself) to the Gradle path of each project. The task uses
+     * this map to route {@code --tests} filters to the correct module task.
+     */
+    private static Map<String, String> collectSubprojectPaths(Project rootProject) {
+        File rootDir = rootProject.getProjectDir();
+        Map<String, String> result = new LinkedHashMap<>();
+        rootProject.getAllprojects().forEach(p -> {
+            String relative = relativiseNormalised(rootDir, p.getProjectDir());
+            result.putIfAbsent(relative, p.getPath());
+        });
+        return result;
+    }
+
+    private static String relativiseNormalised(File rootDir, File projectDir) {
+        String relative = rootDir.toPath().relativize(projectDir.toPath()).toString();
+        if (relative.isEmpty()) {
+            return "";
+        }
+        return relative.replace(File.separatorChar, '/');
     }
 }

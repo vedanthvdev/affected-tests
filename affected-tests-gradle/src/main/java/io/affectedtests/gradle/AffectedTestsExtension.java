@@ -1,7 +1,6 @@
 package io.affectedtests.gradle;
 
 import org.gradle.api.provider.ListProperty;
-import org.gradle.api.provider.MapProperty;
 import org.gradle.api.provider.Property;
 
 /**
@@ -13,7 +12,7 @@ import org.gradle.api.provider.Property;
  *     baseRef = "origin/master"
  *     includeUncommitted = true
  *     runAllIfNoMatches = false
- *     strategies = ["naming", "usage", "impl"]
+ *     strategies = ["naming", "usage", "impl", "transitive"]
  *     transitiveDepth = 2
  *     testSuffixes = ["Test", "IT", "ITTest", "IntegrationTest"]
  *     sourceDirs = ["src/main/java"]
@@ -59,15 +58,20 @@ public abstract class AffectedTestsExtension {
     public abstract Property<Boolean> getRunAllIfNoMatches();
 
     /**
-     * Strategies to use for test discovery.
-     * Default: {@code ["naming", "usage", "impl"]}.
+     * Strategies to use for test discovery. Valid values:
+     * {@code "naming"}, {@code "usage"}, {@code "impl"}, {@code "transitive"}.
+     * Default: all four.
+     *
+     * <p>The {@code transitive} strategy additionally respects
+     * {@link #getTransitiveDepth() transitiveDepth}.
      *
      * @return the strategies list property
      */
     public abstract ListProperty<String> getStrategies();
 
     /**
-     * How many levels of transitive dependencies to follow.
+     * How many levels of transitive dependencies to follow when the
+     * {@code transitive} strategy is enabled.
      * Default: {@code 2}. Range: 0–5.
      *
      * @return the transitive depth property
@@ -121,12 +125,4 @@ public abstract class AffectedTestsExtension {
      * @return the implementation naming list property
      */
     public abstract ListProperty<String> getImplementationNaming();
-
-    /**
-     * Mapping of source project to test project for multi-module builds
-     * (e.g. {@code [":api": ":application"]}).
-     *
-     * @return the test project mapping property
-     */
-    public abstract MapProperty<String, String> getTestProjectMapping();
 }

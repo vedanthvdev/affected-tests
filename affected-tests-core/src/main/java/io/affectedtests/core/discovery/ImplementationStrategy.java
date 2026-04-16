@@ -48,12 +48,14 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
 
         Set<String> implClasses = findImplementations(changedProductionClasses,
                 collectSourceFqns(projectDir),
-                SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs()));
+                SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs()),
+                null);
         return discoverTestsForImpls(implClasses, projectDir, null);
     }
 
     /**
-     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     * Discovers tests using a pre-built project index (avoids redundant file walks
+     * and AST parses).
      */
     public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
         if (!config.includeImplementationTests()) {
@@ -62,7 +64,7 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         }
 
         Set<String> implClasses = findImplementations(changedProductionClasses,
-                index.sourceFqns(), index.sourceFiles());
+                index.sourceFqns(), index.sourceFiles(), index);
         return discoverTestsForImpls(implClasses, null, index);
     }
 
@@ -72,12 +74,12 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         if (!implClasses.isEmpty()) {
             log.info("[impl] Found {} implementation classes", implClasses.size());
 
-            if (config.strategies().contains("naming")) {
+            if (config.strategies().contains(AffectedTestsConfig.STRATEGY_NAMING)) {
                 discoveredTests.addAll(index != null
                         ? namingStrategy.discoverTests(implClasses, index)
                         : namingStrategy.discoverTests(implClasses, projectDir));
             }
-            if (config.strategies().contains("usage")) {
+            if (config.strategies().contains(AffectedTestsConfig.STRATEGY_USAGE)) {
                 discoveredTests.addAll(index != null
                         ? usageStrategy.discoverTests(implClasses, index)
                         : usageStrategy.discoverTests(implClasses, projectDir));
@@ -94,7 +96,8 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
      */
     private Set<String> findImplementations(Set<String> changedClasses,
                                             Set<String> allSourceFqns,
-                                            List<Path> sourceFiles) {
+                                            List<Path> sourceFiles,
+                                            ProjectIndex index) {
         Set<String> implementations = new LinkedHashSet<>();
 
         Map<String, Set<String>> simpleNameToFqns = new HashMap<>();
@@ -115,51 +118,57 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         }
 
         // 2. AST scanning: find classes that extend/implement changed types
-        JavaParser parser = new JavaParser();
+        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
 
         for (Path sourceFile : sourceFiles) {
-            try {
-                ParseResult<CompilationUnit> result = parser.parse(sourceFile);
-                if (!result.isSuccessful() || result.getResult().isEmpty()) continue;
+            CompilationUnit cu = parseOrGet(sourceFile, index, fallbackParser);
+            if (cu == null) continue;
 
-                CompilationUnit cu = result.getResult().get();
-                List<ClassOrInterfaceDeclaration> declarations =
-                        cu.findAll(ClassOrInterfaceDeclaration.class);
+            List<ClassOrInterfaceDeclaration> declarations =
+                    cu.findAll(ClassOrInterfaceDeclaration.class);
 
-                for (ClassOrInterfaceDeclaration decl : declarations) {
-                    // Check extends
-                    for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
-                        if (simpleNameToFqns.containsKey(extended.getNameAsString())) {
-                            String implFqn = extractFqn(cu, decl);
-                            if (implFqn != null) {
-                                implementations.add(implFqn);
-                                log.debug("[impl] {} extends {}", implFqn, extended.getNameAsString());
-                            }
-                        }
-                    }
-                    // Check implements
-                    for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
-                        if (simpleNameToFqns.containsKey(implemented.getNameAsString())) {
-                            String implFqn = extractFqn(cu, decl);
-                            if (implFqn != null) {
-                                implementations.add(implFqn);
-                                log.debug("[impl] {} implements {}", implFqn, implemented.getNameAsString());
-                            }
+            for (ClassOrInterfaceDeclaration decl : declarations) {
+                for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
+                    if (simpleNameToFqns.containsKey(extended.getNameAsString())) {
+                        String implFqn = extractFqn(cu, decl);
+                        if (implFqn != null) {
+                            implementations.add(implFqn);
+                            log.debug("[impl] {} extends {}", implFqn, extended.getNameAsString());
                         }
                     }
                 }
-            } catch (Exception e) {
-                log.debug("Error parsing source file {}: {}", sourceFile, e.getMessage());
+                for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
+                    if (simpleNameToFqns.containsKey(implemented.getNameAsString())) {
+                        String implFqn = extractFqn(cu, decl);
+                        if (implFqn != null) {
+                            implementations.add(implFqn);
+                            log.debug("[impl] {} implements {}", implFqn, implemented.getNameAsString());
+                        }
+                    }
+                }
             }
         }
 
         return implementations;
     }
 
+    private CompilationUnit parseOrGet(Path file, ProjectIndex index, JavaParser fallbackParser) {
+        if (index != null) {
+            return index.compilationUnit(file);
+        }
+        try {
+            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
+            if (result.isSuccessful() && result.getResult().isPresent()) {
+                return result.getResult().get();
+            }
+        } catch (Exception e) {
+            log.debug("Error parsing source file {}: {}", file, e.getMessage());
+        }
+        return null;
+    }
+
     /**
      * Collects FQNs for all source files under the project dir at any depth.
-     * Delegates to {@link SourceFileScanner#findAllMatchingDirs} so nested
-     * modules like {@code services/payment/src/main/java} are included.
      */
     private Set<String> collectSourceFqns(Path projectDir) {
         Set<String> fqns = new LinkedHashSet<>();

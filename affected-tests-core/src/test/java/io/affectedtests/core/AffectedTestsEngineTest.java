@@ -8,7 +8,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -32,7 +31,6 @@ class AffectedTestsEngineTest {
         try (Git git = initRepoWithInitialCommit()) {
             String base = git.log().call().iterator().next().getName();
 
-            // Create production source + test source
             Path prodDir = tempDir.resolve("src/main/java/com/example");
             Files.createDirectories(prodDir);
             Files.writeString(prodDir.resolve("FooService.java"),
@@ -60,6 +58,8 @@ class AffectedTestsEngineTest {
             assertTrue(result.testClassFqns().contains("com.example.FooServiceTest"),
                     "Should discover test via naming strategy");
             assertFalse(result.runAll());
+            // Result must expose the test file path for per-module routing.
+            assertNotNull(result.testFqnToPath().get("com.example.FooServiceTest"));
         }
     }
 
@@ -88,7 +88,6 @@ class AffectedTestsEngineTest {
         try (Git git = initRepoWithInitialCommit()) {
             String base = git.log().call().iterator().next().getName();
 
-            // Create a production file with no matching test
             Path prodDir = tempDir.resolve("src/main/java/com/example");
             Files.createDirectories(prodDir);
             Files.writeString(prodDir.resolve("Orphan.java"),
@@ -112,32 +111,87 @@ class AffectedTestsEngineTest {
     }
 
     @Test
-    void pathTraversalInTestProjectMappingIsRejected() throws Exception {
+    void deletedTestFilesAreNotReportedAsAffected() throws Exception {
+        // Regression test for C2: an old FQN for a deleted test file must not
+        // propagate into the result set — otherwise Gradle's --tests filter
+        // fails with "No tests found".
         try (Git git = initRepoWithInitialCommit()) {
+            // Create + commit both a production class and its test
+            Path prodDir = tempDir.resolve("src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService {}");
+
+            Path testDir = tempDir.resolve("src/test/java/com/example");
+            Files.createDirectories(testDir);
+            Path oldTest = testDir.resolve("FooServiceTest.java");
+            Files.writeString(oldTest,
+                    "package com.example;\npublic class FooServiceTest {}");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add service + test").call();
             String base = git.log().call().iterator().next().getName();
 
-            // Create a file in the "api" module
-            Path apiDir = tempDir.resolve("api/src/main/java/com/example");
-            Files.createDirectories(apiDir);
-            Files.writeString(apiDir.resolve("Service.java"),
-                    "package com.example;\npublic class Service {}");
+            // Modify the service and delete the test file in the next commit
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService { void bar() {} }");
+            Files.delete(oldTest);
             git.add().addFilepattern(".").call();
-            git.commit().setMessage("add service").call();
+            git.add().setUpdate(true).addFilepattern(".").call();
+            git.commit().setMessage("modify service; delete test").call();
 
-            // Malicious mapping: tries to escape project root
             AffectedTestsConfig config = AffectedTestsConfig.builder()
                     .baseRef(base)
                     .includeUncommitted(false)
                     .includeStaged(false)
-                    .testProjectMapping(Map.of(":api", ":../../../etc"))
+                    .strategies(Set.of("naming"))
                     .transitiveDepth(0)
                     .build();
 
             AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
-            // Should NOT throw — the traversal path is silently rejected
             AffectedTestsEngine.AffectedTestsResult result = engine.run();
 
-            assertNotNull(result, "Engine should complete without throwing");
+            assertFalse(result.testClassFqns().contains("com.example.FooServiceTest"),
+                    "Deleted test FQN must not be returned to callers");
+            assertFalse(result.testFqnToPath().containsKey("com.example.FooServiceTest"));
+        }
+    }
+
+    @Test
+    void multiModuleTestPathsArePreservedInResult() throws Exception {
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            // Create a production class + matching test in nested module layout.
+            Path prodDir = tempDir.resolve("moduleA/src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService {}");
+
+            Path testDir = tempDir.resolve("moduleA/src/test/java/com/example");
+            Files.createDirectories(testDir);
+            Files.writeString(testDir.resolve("FooServiceTest.java"),
+                    "package com.example;\npublic class FooServiceTest {}");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add module A").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .strategies(Set.of("naming"))
+                    .transitiveDepth(0)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            Path expected = tempDir.resolve("moduleA/src/test/java/com/example/FooServiceTest.java");
+            Path actual = result.testFqnToPath().get("com.example.FooServiceTest");
+            assertNotNull(actual, "Should expose absolute file path for each discovered test");
+            assertEquals(expected.toAbsolutePath().normalize(),
+                    actual.toAbsolutePath().normalize());
         }
     }
 }

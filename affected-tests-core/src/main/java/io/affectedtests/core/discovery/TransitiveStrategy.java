@@ -24,10 +24,6 @@ import java.util.*;
  * discovers tests for those consumers via the naming and usage strategies.
  * <p>
  * Depth is configurable via {@code transitiveDepth} (default 2, max 5).
- * <p>
- * Example: if {@code BazGateway} changes and {@code FooService} has a
- * {@code BazGateway} field, then at depth 1 we discover
- * {@code FooServiceTest} via naming.
  */
 public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
@@ -57,7 +53,8 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
     }
 
     /**
-     * Discovers tests using a pre-built project index (avoids redundant file walks).
+     * Discovers tests using a pre-built project index (avoids redundant file walks
+     * and AST parses).
      */
     public Set<String> discoverTests(Set<String> changedProductionClasses, ProjectIndex index) {
         return walkTransitives(changedProductionClasses, index.sourceFiles(), null, index);
@@ -76,7 +73,7 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         Set<String> currentLevel = new LinkedHashSet<>(changedProductionClasses);
         Set<String> allVisited = new LinkedHashSet<>(changedProductionClasses);
 
-        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(sourceFiles);
+        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(sourceFiles, index);
 
         for (int depth = 1; depth <= config.transitiveDepth(); depth++) {
             Set<String> nextLevel = new LinkedHashSet<>();
@@ -116,13 +113,11 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
     /**
      * Builds a <em>reverse</em> dependency map: for each production class FQN,
-     * lists the FQNs of other production classes that <strong>depend on</strong> it
-     * (i.e. have it as a field type). This is the "usedBy" direction, so when a
-     * class changes we can find all classes that consume it.
+     * lists the FQNs of other production classes that depend on it.
      */
-    private Map<String, Set<String>> buildReverseDependencyMap(List<Path> sourceFiles) {
+    private Map<String, Set<String>> buildReverseDependencyMap(List<Path> sourceFiles, ProjectIndex index) {
         Map<String, Set<String>> reverseMap = new HashMap<>();
-        JavaParser parser = new JavaParser();
+        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
 
         // First pass: collect all known FQNs so we can resolve simple names
         Set<String> allKnownFqns = new HashSet<>();
@@ -135,75 +130,66 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
 
         // Second pass: for each source file, find field types and build reverse edges
         for (Path file : sourceFiles) {
-            try {
-                ParseResult<CompilationUnit> result = parser.parse(file);
-                if (!result.isSuccessful() || result.getResult().isEmpty()) continue;
+            CompilationUnit cu = parseOrGet(file, index, fallbackParser);
+            if (cu == null) continue;
 
-                CompilationUnit cu = result.getResult().get();
-                String classFqn = pathToFqn(file);
-                if (classFqn == null) continue;
+            String classFqn = pathToFqn(file);
+            if (classFqn == null) continue;
 
-                // Build import map
-                Map<String, String> importMap = new HashMap<>();
-                Set<String> wildcardPackages = new HashSet<>();
-                for (ImportDeclaration imp : cu.getImports()) {
-                    if (imp.isAsterisk()) {
-                        wildcardPackages.add(imp.getNameAsString());
-                    } else {
-                        String impFqn = imp.getNameAsString();
-                        importMap.put(SourceFileScanner.simpleClassName(impFqn), impFqn);
+            Map<String, String> importMap = new HashMap<>();
+            Set<String> wildcardPackages = new HashSet<>();
+            for (ImportDeclaration imp : cu.getImports()) {
+                if (imp.isAsterisk()) {
+                    wildcardPackages.add(imp.getNameAsString());
+                } else {
+                    String impFqn = imp.getNameAsString();
+                    importMap.put(SourceFileScanner.simpleClassName(impFqn), impFqn);
+                }
+            }
+
+            String currentPackage = cu.getPackageDeclaration()
+                    .map(pd -> pd.getNameAsString())
+                    .orElse("");
+
+            Set<String> referencedTypes = new LinkedHashSet<>();
+
+            for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
+                for (VariableDeclarator var : field.getVariables()) {
+                    referencedTypes.add(normalizeTypeName(var.getTypeAsString()));
+                }
+            }
+
+            for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
+                referencedTypes.add(normalizeTypeName(method.getTypeAsString()));
+                for (Parameter param : method.getParameters()) {
+                    referencedTypes.add(normalizeTypeName(param.getTypeAsString()));
+                }
+            }
+
+            for (String typeName : referencedTypes) {
+                String resolvedFqn = importMap.get(typeName);
+                if (resolvedFqn == null) {
+                    String candidate = currentPackage.isEmpty()
+                            ? typeName : currentPackage + "." + typeName;
+                    if (allKnownFqns.contains(candidate)) {
+                        resolvedFqn = candidate;
                     }
                 }
-
-                String currentPackage = cu.getPackageDeclaration()
-                        .map(pd -> pd.getNameAsString())
-                        .orElse("");
-
-                Set<String> referencedTypes = new LinkedHashSet<>();
-
-                // Extract field types
-                for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
-                    for (VariableDeclarator var : field.getVariables()) {
-                        referencedTypes.add(stripGenerics(var.getTypeAsString()));
-                    }
-                }
-
-                // Extract method parameter types and return types
-                for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
-                    referencedTypes.add(stripGenerics(method.getTypeAsString()));
-                    for (Parameter param : method.getParameters()) {
-                        referencedTypes.add(stripGenerics(param.getTypeAsString()));
-                    }
-                }
-
-                // Resolve each referenced type and build reverse edges
-                for (String typeName : referencedTypes) {
-                    String resolvedFqn = importMap.get(typeName);
-                    if (resolvedFqn == null) {
-                        String candidate = currentPackage.isEmpty()
-                                ? typeName : currentPackage + "." + typeName;
+                if (resolvedFqn == null) {
+                    for (String pkg : wildcardPackages) {
+                        String candidate = pkg + "." + typeName;
                         if (allKnownFqns.contains(candidate)) {
                             resolvedFqn = candidate;
+                            break;
                         }
-                    }
-                    if (resolvedFqn == null) {
-                        for (String pkg : wildcardPackages) {
-                            String candidate = pkg + "." + typeName;
-                            if (allKnownFqns.contains(candidate)) {
-                                resolvedFqn = candidate;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (resolvedFqn != null && allKnownFqns.contains(resolvedFqn)
-                            && !resolvedFqn.equals(classFqn)) {
-                        reverseMap.computeIfAbsent(resolvedFqn, k -> new LinkedHashSet<>())
-                                .add(classFqn);
                     }
                 }
-            } catch (Exception e) {
-                log.debug("Error parsing {} for dependency map: {}", file, e.getMessage());
+
+                if (resolvedFqn != null && allKnownFqns.contains(resolvedFqn)
+                        && !resolvedFqn.equals(classFqn)) {
+                    reverseMap.computeIfAbsent(resolvedFqn, k -> new LinkedHashSet<>())
+                            .add(classFqn);
+                }
             }
         }
 
@@ -211,9 +197,32 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         return reverseMap;
     }
 
-    private static String stripGenerics(String typeName) {
+    private CompilationUnit parseOrGet(Path file, ProjectIndex index, JavaParser fallbackParser) {
+        if (index != null) {
+            return index.compilationUnit(file);
+        }
+        try {
+            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
+            if (result.isSuccessful() && result.getResult().isPresent()) {
+                return result.getResult().get();
+            }
+        } catch (Exception e) {
+            log.debug("Error parsing {} for dependency map: {}", file, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Strips generic parameters and array brackets from a type name so
+     * {@code List<Foo>} and {@code Foo[]} both normalise to {@code Foo}.
+     */
+    static String normalizeTypeName(String typeName) {
         int idx = typeName.indexOf('<');
-        return idx >= 0 ? typeName.substring(0, idx) : typeName;
+        String base = idx >= 0 ? typeName.substring(0, idx) : typeName;
+        while (base.endsWith("[]")) {
+            base = base.substring(0, base.length() - 2);
+        }
+        return base.trim();
     }
 
     private String pathToFqn(Path file) {
