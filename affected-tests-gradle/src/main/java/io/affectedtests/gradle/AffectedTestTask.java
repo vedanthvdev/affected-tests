@@ -35,9 +35,8 @@ import java.util.regex.Pattern;
  *   <li>Executes a Gradle {@code test} invocation with {@code --tests} filters</li>
  * </ol>
  *
- * <p>The task is Configuration Cache compatible: it does not access
- * {@code Project} at execution time and uses injected {@link ExecOperations}
- * to spawn the test run.
+ * <p>Not compatible with Configuration Cache (reads live git state and
+ * scans the file system at execution time).
  */
 public abstract class AffectedTestTask extends DefaultTask {
 
@@ -47,6 +46,7 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Git base ref to diff against.
+     * Default: {@code "origin/master"}. Override via {@code -PaffectedTestsBaseRef=...}.
      *
      * @return the base ref property
      */
@@ -54,7 +54,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<String> getBaseRef();
 
     /**
-     * Whether to include uncommitted (unstaged) changes.
+     * Whether to include uncommitted (unstaged) changes in the diff.
+     * Default: {@code true}.
      *
      * @return the include uncommitted property
      */
@@ -62,7 +63,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getIncludeUncommitted();
 
     /**
-     * Whether to include staged changes.
+     * Whether to include staged (added to index) changes in the diff.
+     * Default: {@code true}.
      *
      * @return the include staged property
      */
@@ -70,7 +72,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getIncludeStaged();
 
     /**
-     * Whether to run the full suite if no affected tests are found.
+     * Whether to run the full test suite when no affected tests are found.
+     * Default: {@code false} (skip tests when nothing is affected).
      *
      * @return the run-all-if-no-matches property
      */
@@ -78,7 +81,9 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getRunAllIfNoMatches();
 
     /**
-     * Discovery strategies to use.
+     * Discovery strategies to use for finding affected tests.
+     * Valid values: {@code "naming"}, {@code "usage"}, {@code "impl"}.
+     * Default: all three.
      *
      * @return the strategies list property
      */
@@ -86,7 +91,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getStrategies();
 
     /**
-     * Transitive dependency depth.
+     * How many levels of transitive dependencies to follow.
+     * Range: 0 (disabled) to 5. Default: {@code 2}.
      *
      * @return the transitive depth property
      */
@@ -94,7 +100,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Integer> getTransitiveDepth();
 
     /**
-     * Test class suffixes for the naming strategy.
+     * Suffixes used by the naming strategy to find test classes.
+     * Default: {@code ["Test", "IT", "ITTest", "IntegrationTest"]}.
      *
      * @return the test suffixes list property
      */
@@ -102,7 +109,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getTestSuffixes();
 
     /**
-     * Production source directories.
+     * Production source directories relative to each module root.
+     * Default: {@code ["src/main/java"]}.
      *
      * @return the source dirs list property
      */
@@ -110,7 +118,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getSourceDirs();
 
     /**
-     * Test source directories.
+     * Test source directories relative to each module root.
+     * Default: {@code ["src/test/java"]}.
      *
      * @return the test dirs list property
      */
@@ -119,6 +128,7 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Glob patterns for files to exclude from analysis.
+     * Default: {@code ["&#42;&#42;/generated/&#42;&#42;"]}.
      *
      * @return the exclude paths list property
      */
@@ -126,7 +136,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getExcludePaths();
 
     /**
-     * Whether to include tests for implementations of changed types.
+     * Whether to include tests for implementations of changed interfaces/base classes.
+     * Default: {@code true}.
      *
      * @return the include implementation tests property
      */
@@ -134,7 +145,9 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getIncludeImplementationTests();
 
     /**
-     * Implementation naming suffixes.
+     * Suffixes for finding implementation classes (e.g. {@code "Impl"} matches
+     * {@code FooServiceImpl} for a changed {@code FooService}).
+     * Default: {@code ["Impl"]}.
      *
      * @return the implementation naming list property
      */
@@ -142,7 +155,10 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getImplementationNaming();
 
     /**
-     * Mapping of source project to test project (for multi-module).
+     * Mapping of source project to test project for multi-module builds
+     * where tests for one module live in a different module
+     * (e.g. {@code [":api": ":application"]}).
+     * Default: empty map.
      *
      * @return the test project mapping property
      */
@@ -159,7 +175,6 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Injected by Gradle for executing the test subprocess.
-     * Configuration Cache safe.
      *
      * @return the exec operations service
      */
