@@ -23,7 +23,7 @@ scmVersion {
 }
 
 allprojects {
-    group = 'io.affectedtests'
+    group = 'io.github.vedanthvdev'
     version = scmVersion.version
 
     repositories {

@@ -13,7 +13,7 @@ import java.util.Map;
  * Gradle plugin that registers the {@code affectedTest} task and the
  * {@code affectedTests} DSL extension.
  *
- * <p>Plugin ID: {@code io.affectedtests}
+ * <p>Plugin ID: {@code io.github.vedanthvdev.affectedtests}
  */
 public class AffectedTestsPlugin implements Plugin<Project> {
 

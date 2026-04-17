@@ -11,11 +11,11 @@ A Gradle plugin that detects changes in the current branch and runs only the uni
 ```groovy
 // build.gradle
 plugins {
-    id 'io.affectedtests' version '<latest>'
+    id 'io.github.vedanthvdev.affectedtests' version 'x.y.z'
 }
 ```
 
-> Check [Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.affectedtests) for the latest version.
+> Check [Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.github.vedanthvdev.affectedtests) for the latest version.
 
 ### 2. Run affected tests
 
@@ -159,7 +159,7 @@ This makes `--tests` filters scope cleanly to their owning module, instead of be
 ```
 affected-tests/
 ├── affected-tests-core/          # Git integration, change detection, test discovery
-├── affected-tests-gradle/        # Gradle plugin (io.affectedtests)
+├── affected-tests-gradle/        # Gradle plugin (io.github.vedanthvdev.affectedtests)
 ├── build.gradle
 ├── settings.gradle
 └── README.md

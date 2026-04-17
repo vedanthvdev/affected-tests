@@ -8,7 +8,6 @@ dependencies {
     implementation project(':affected-tests-core')
 }
 
-group = 'io.affectedtests'
 version = rootProject.version
 
 // Shadow the core library into the plugin JAR so consumers don't need to resolve it separately.
@@ -71,11 +70,21 @@ gradlePlugin {
 
     plugins {
         affectedTests {
-            id = 'io.affectedtests'
+            id = 'io.github.vedanthvdev.affectedtests'
             implementationClass = 'io.affectedtests.gradle.AffectedTestsPlugin'
             displayName = 'Affected Tests Plugin'
             description = 'Detects changes in the current branch and runs only the tests relevant to those changes. Zero config, CI-friendly, multi-module support.'
             tags.set(['testing', 'affected-tests', 'ci', 'git', 'junit', 'test-selection'])
+
+            // plugin-publish 2.1.x deprecates omitting this declaration and will
+            // eventually reject plugins that don't supply one. Declared as
+            // `false` today because AffectedTestTask is not yet CC-safe; flip
+            // to `true` once the task is made cacheable.
+            compatibility(it) {
+                features {
+                    configurationCache = false
+                }
+            }
         }
     }
 }
