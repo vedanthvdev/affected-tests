@@ -29,7 +29,7 @@ class ShadowPublishFunctionalTest {
         Files.writeString(projectDir.resolve("settings.gradle"), "rootProject.name = 'test-project'\n");
         Files.writeString(projectDir.resolve("build.gradle"), """
                 plugins {
-                    id 'io.affectedtests'
+                    id 'io.github.vedanthvdev.affectedtests'
                 }
                 """);
 
@@ -52,7 +52,7 @@ class ShadowPublishFunctionalTest {
         Files.writeString(projectDir.resolve("settings.gradle"), "rootProject.name = 'test-project'\n");
         Files.writeString(projectDir.resolve("build.gradle"), """
                 plugins {
-                    id 'io.affectedtests'
+                    id 'io.github.vedanthvdev.affectedtests'
                 }
                 """);
 

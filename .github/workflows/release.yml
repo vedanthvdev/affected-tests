@@ -80,7 +80,7 @@ jobs:
         env:
           VERSION: ${{ steps.released.outputs.version }}
         run: |
-          URL="https://plugins.gradle.org/plugin/io.affectedtests/$VERSION"
+          URL="https://plugins.gradle.org/plugin/io.github.vedanthvdev.affectedtests/$VERSION"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$URL")
           if [[ "$STATUS" == "200" ]]; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"

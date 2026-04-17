@@ -11,7 +11,7 @@ class AffectedTestsPluginTest {
     @Test
     void pluginRegistersTask() {
         Project project = ProjectBuilder.builder().build();
-        project.getPlugins().apply("io.affectedtests");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
 
         assertNotNull(project.getTasks().findByName("affectedTest"),
                 "affectedTest task should be registered");
@@ -20,7 +20,7 @@ class AffectedTestsPluginTest {
     @Test
     void pluginRegistersExtension() {
         Project project = ProjectBuilder.builder().build();
-        project.getPlugins().apply("io.affectedtests");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
 
         assertNotNull(project.getExtensions().findByName("affectedTests"),
                 "affectedTests extension should be registered");
@@ -29,7 +29,7 @@ class AffectedTestsPluginTest {
     @Test
     void extensionHasDefaults() {
         Project project = ProjectBuilder.builder().build();
-        project.getPlugins().apply("io.affectedtests");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
 
         AffectedTestsExtension ext = project.getExtensions()
                 .getByType(AffectedTestsExtension.class);
@@ -51,7 +51,7 @@ class AffectedTestsPluginTest {
     @Test
     void taskHasCorrectGroupAndDescription() {
         Project project = ProjectBuilder.builder().build();
-        project.getPlugins().apply("io.affectedtests");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
 
         var task = project.getTasks().findByName("affectedTest");
         assertNotNull(task);
@@ -63,7 +63,7 @@ class AffectedTestsPluginTest {
     @Test
     void taskInputsAreWiredFromExtension() {
         Project project = ProjectBuilder.builder().build();
-        project.getPlugins().apply("io.affectedtests");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
 
         // Modify extension
         AffectedTestsExtension ext = project.getExtensions()
