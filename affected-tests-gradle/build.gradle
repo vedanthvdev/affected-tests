@@ -64,6 +64,11 @@ gradlePlugin {
     website = 'https://github.com/vedanthvdev/affected-tests'
     vcsUrl = 'https://github.com/vedanthvdev/affected-tests.git'
 
+    // Ensure plugin-under-test metadata is generated for both test source sets.
+    // Without this, GradleRunner.withPluginClasspath() in functional tests would
+    // only work by accident via the testImplementation extension chain.
+    testSourceSets(sourceSets.test, sourceSets.functionalTest)
+
     plugins {
         affectedTests {
             id = 'io.affectedtests'

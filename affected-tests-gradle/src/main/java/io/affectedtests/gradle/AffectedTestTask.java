@@ -19,29 +19,35 @@ import javax.inject.Inject;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * Gradle task that detects affected tests and executes them.
  *
- * <p>This task:
+ * <p>Execution flow:
  * <ol>
  *   <li>Detects git changes against the configured base ref</li>
  *   <li>Maps changed files to production/test classes</li>
  *   <li>Discovers which test classes are affected</li>
- *   <li>Executes a Gradle {@code test} invocation with {@code --tests} filters</li>
+ *   <li>Groups FQNs by owning subproject and runs {@code :<module>:test --tests <fqn>}
+ *       once per module so that {@code --tests} filters don't cross module boundaries</li>
  * </ol>
  *
- * <p>Not compatible with Configuration Cache (reads live git state and
- * scans the file system at execution time).
+ * <p>Not compatible with Configuration Cache: reads live git state and scans
+ * the file system at execution time. The task is also deliberately marked as
+ * never up-to-date so git changes always trigger a re-run.
  */
 public abstract class AffectedTestTask extends DefaultTask {
 
     public AffectedTestTask() {
         notCompatibleWithConfigurationCache("Reads live git state and scans the file system at execution time");
+        // The task has no declared outputs and its result depends on live git state,
+        // so up-to-date checks must always miss.
+        getOutputs().upToDateWhen(t -> false);
     }
 
     /**
@@ -82,8 +88,8 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Discovery strategies to use for finding affected tests.
-     * Valid values: {@code "naming"}, {@code "usage"}, {@code "impl"}.
-     * Default: all three.
+     * Valid values: {@code "naming"}, {@code "usage"}, {@code "impl"}, {@code "transitive"}.
+     * Default: all four.
      *
      * @return the strategies list property
      */
@@ -91,7 +97,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getStrategies();
 
     /**
-     * How many levels of transitive dependencies to follow.
+     * How many levels of transitive dependencies to follow when the
+     * {@code transitive} strategy is enabled.
      * Range: 0 (disabled) to 5. Default: {@code 2}.
      *
      * @return the transitive depth property
@@ -155,15 +162,15 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getImplementationNaming();
 
     /**
-     * Mapping of source project to test project for multi-module builds
-     * where tests for one module live in a different module
-     * (e.g. {@code [":api": ":application"]}).
-     * Default: empty map.
+     * Map of subproject directory (relative to the root project, empty string
+     * for the root project itself) to the Gradle path of that subproject
+     * (e.g. {@code ":services:payment"}). Populated automatically by the plugin
+     * and used to group affected test FQNs by their owning module.
      *
-     * @return the test project mapping property
+     * @return the subproject dirs map property
      */
-    @Input
-    public abstract MapProperty<String, String> getTestProjectMapping();
+    @Internal
+    public abstract MapProperty<String, String> getSubprojectPaths();
 
     /**
      * The root project directory (resolved at configuration time).
@@ -188,7 +195,6 @@ public abstract class AffectedTestTask extends DefaultTask {
     public void runAffectedTests() {
         Path projectDir = getRootDir().get().getAsFile().toPath();
 
-        // Build config from task properties
         AffectedTestsConfig config = AffectedTestsConfig.builder()
                 .baseRef(getBaseRef().get())
                 .includeUncommitted(getIncludeUncommitted().get())
@@ -202,14 +208,11 @@ public abstract class AffectedTestTask extends DefaultTask {
                 .excludePaths(getExcludePaths().get())
                 .includeImplementationTests(getIncludeImplementationTests().get())
                 .implementationNaming(getImplementationNaming().get())
-                .testProjectMapping(getTestProjectMapping().get())
                 .build();
 
-        // Run the engine
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
 
-        // Report
         getLogger().lifecycle("Affected Tests: {} changed files, {} production classes, {} test classes affected",
                 result.changedFiles().size(),
                 result.changedProductionClasses().size(),
@@ -220,39 +223,54 @@ public abstract class AffectedTestTask extends DefaultTask {
             return;
         }
 
-        // Build the Gradle command to execute tests
-        executeTests(projectDir, result.testClassFqns(), result.runAll());
+        executeTests(projectDir, result.testClassFqns(), result.testFqnToPath(), result.runAll());
     }
 
-    private static final Pattern VALID_FQN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.$]*$");
-
-    private void executeTests(Path projectDir, Set<String> testFqns, boolean runAll) {
+    private void executeTests(Path projectDir,
+                              Set<String> testFqns,
+                              Map<String, Path> fqnToPath,
+                              boolean runAll) {
         String gradleCommand = resolveGradleCommand(projectDir);
 
         List<String> args = new ArrayList<>();
         args.add(gradleCommand);
-        args.add("test");
 
-        if (!runAll && !testFqns.isEmpty()) {
-            for (String fqn : testFqns) {
-                if (!VALID_FQN.matcher(fqn).matches()) {
-                    getLogger().warn("Skipping invalid test FQN: {}", fqn);
-                    continue;
-                }
-                args.add("--tests");
-                args.add(fqn);
-            }
-            getLogger().lifecycle("Running {} affected test classes:", testFqns.size());
-            testFqns.forEach(t -> getLogger().lifecycle("  -> {}", t));
-        } else {
+        if (runAll || testFqns.isEmpty()) {
             getLogger().lifecycle("Running ALL tests (runAllIfNoMatches=true).");
+            args.add("test");
+        } else {
+            // Group FQNs by owning subproject and emit ":moduleA:test --tests x
+            // :moduleB:test --tests y" so Gradle's --tests filters don't spill
+            // across modules (where they'd fail any subproject that doesn't
+            // happen to contain the FQN).
+            Map<String, List<String>> grouped = groupFqnsByModule(projectDir, testFqns, fqnToPath);
+
+            getLogger().lifecycle("Running {} affected test classes across {} module(s):",
+                    testFqns.size(), grouped.size());
+
+            for (Map.Entry<String, List<String>> entry : grouped.entrySet()) {
+                String modulePath = entry.getKey();
+                List<String> fqnsForModule = entry.getValue();
+
+                String taskPath = modulePath.isEmpty() ? "test" : modulePath + ":test";
+                args.add(taskPath);
+                for (String fqn : fqnsForModule) {
+                    args.add("--tests");
+                    args.add(fqn);
+                    getLogger().lifecycle("  {} -> {}", taskPath, fqn);
+                }
+            }
         }
 
-        // Don't rebuild — tests are already compiled
+        // Skip recompiling production code — testClasses (declared as a task
+        // dependency by the plugin) has already been built as part of this
+        // outer Gradle invocation, so the class files the nested process needs
+        // are on disk. We deliberately do NOT pass -x compileTestJava: on a
+        // clean checkout the test classes wouldn't exist yet, and Gradle would
+        // fail with "No tests found". Letting compileTestJava run is cheap and
+        // correct on all checkouts.
         args.add("-x");
         args.add("compileJava");
-        args.add("-x");
-        args.add("compileTestJava");
 
         ExecResult execResult = getExecOperations().exec(spec -> {
             spec.commandLine(args);
@@ -266,15 +284,72 @@ public abstract class AffectedTestTask extends DefaultTask {
     }
 
     /**
+     * Groups discovered test FQNs by the Gradle path of the subproject that
+     * owns each test file. Tests under the root project fall under the
+     * empty-string key and get dispatched to the root {@code test} task.
+     *
+     * <p>If no matching subproject is found for an FQN (e.g. the project
+     * structure changed since configuration time), the FQN is routed to the
+     * root project as a best-effort fallback.
+     */
+    private Map<String, List<String>> groupFqnsByModule(Path projectDir,
+                                                       Set<String> testFqns,
+                                                       Map<String, Path> fqnToPath) {
+        Map<String, String> subprojectPaths = getSubprojectPaths().getOrElse(Map.of());
+
+        // Sort entries by descending dir-length so that deeper subprojects
+        // (e.g. "services/payment") win over their parents ("services").
+        List<Map.Entry<String, String>> orderedEntries = new ArrayList<>(subprojectPaths.entrySet());
+        orderedEntries.sort((a, b) -> Integer.compare(b.getKey().length(), a.getKey().length()));
+
+        Map<String, List<String>> grouped = new LinkedHashMap<>();
+        for (String fqn : testFqns) {
+            Path file = fqnToPath.get(fqn);
+            String moduleGradlePath = resolveOwningModule(projectDir, file, orderedEntries);
+            grouped.computeIfAbsent(moduleGradlePath, k -> new ArrayList<>()).add(fqn);
+        }
+        return grouped;
+    }
+
+    private String resolveOwningModule(Path projectDir, Path file,
+                                       List<Map.Entry<String, String>> orderedEntries) {
+        if (file == null) {
+            return "";
+        }
+        Path relative;
+        try {
+            relative = projectDir.relativize(file.toAbsolutePath());
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
+        String normalized = relative.toString().replace(File.separatorChar, '/');
+        for (Map.Entry<String, String> entry : orderedEntries) {
+            String dir = entry.getKey();
+            if (dir.isEmpty()) continue;
+            String prefix = dir.endsWith("/") ? dir : dir + "/";
+            if (normalized.startsWith(prefix)) {
+                return entry.getValue();
+            }
+        }
+        return "";
+    }
+
+    /**
      * Resolves the Gradle command to use. Prefers the wrapper in the project directory;
      * falls back to the bare {@code "gradle"} command name so the OS PATH is used.
      */
-    private static String resolveGradleCommand(Path projectDir) {
+    private String resolveGradleCommand(Path projectDir) {
         String wrapperName = isWindows() ? "gradlew.bat" : "gradlew";
         File gradlew = projectDir.resolve(wrapperName).toFile();
         if (gradlew.exists() && gradlew.canExecute()) {
             return gradlew.getAbsolutePath();
         }
+        // The wrapper is the contract we expect; falling back to a system-wide
+        // gradle is a last resort. Warn loudly so broken checkouts don't pass
+        // silently in CI.
+        getLogger().warn("Gradle wrapper not found at {}/{}; falling back to '{}' from PATH. "
+                        + "This usually indicates a broken or incomplete checkout.",
+                projectDir, wrapperName, isWindows() ? "gradle.bat" : "gradle");
         return isWindows() ? "gradle.bat" : "gradle";
     }
 

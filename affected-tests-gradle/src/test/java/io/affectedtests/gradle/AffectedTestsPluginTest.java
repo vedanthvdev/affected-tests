@@ -38,12 +38,14 @@ class AffectedTestsPluginTest {
         assertTrue(ext.getIncludeUncommitted().get());
         assertTrue(ext.getIncludeStaged().get());
         assertFalse(ext.getRunAllIfNoMatches().get());
-        assertEquals(3, ext.getStrategies().get().size());
+        // Defaults: naming, usage, impl, transitive — transitive is gated by the
+        // strategies list (see I9 in the review), not just by transitiveDepth.
+        assertEquals(4, ext.getStrategies().get().size());
+        assertTrue(ext.getStrategies().get().contains("transitive"));
         assertEquals(2, ext.getTransitiveDepth().get());
         assertEquals(4, ext.getTestSuffixes().get().size());
         assertTrue(ext.getIncludeImplementationTests().get());
         assertEquals(1, ext.getImplementationNaming().get().size());
-        assertTrue(ext.getTestProjectMapping().get().isEmpty());
     }
 
     @Test

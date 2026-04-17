@@ -8,7 +8,6 @@ import io.affectedtests.core.mapping.PathToClassMapper.MappingResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -22,16 +21,11 @@ import java.util.*;
  *   <li>Run all enabled discovery strategies (naming, usage, impl, transitive)
  *       and merge their results. Scanning is recursive — modules at any nesting
  *       depth are discovered automatically.</li>
- *   <li>Return the union of all discovered test FQNs for execution</li>
+ *   <li>Filter the union against test classes that actually exist on disk so
+ *       deleted/renamed tests don't reach the downstream {@code test} task</li>
+ *   <li>Return the filtered FQN set together with the file path of each test,
+ *       so callers can route per-module test invocations correctly</li>
  * </ol>
- *
- * <p>Usage:
- * <pre>{@code
- * AffectedTestsConfig config = AffectedTestsConfig.builder().build();
- * AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
- * AffectedTestsResult result = engine.run();
- * // result.testClassFqns() contains the FQNs of tests to run
- * }</pre>
  */
 public final class AffectedTestsEngine {
 
@@ -47,9 +41,21 @@ public final class AffectedTestsEngine {
 
     /**
      * Result of the affected tests analysis.
+     *
+     * @param testClassFqns            FQNs of tests that should be executed
+     * @param testFqnToPath            map of test FQN to its absolute file path on
+     *                                 disk (used by callers to route invocations
+     *                                 to the correct subproject). Empty when
+     *                                 {@link #runAll} is {@code true}.
+     * @param changedFiles             raw changed file paths from git
+     * @param changedProductionClasses production FQNs detected in the diff
+     * @param changedTestClasses       test FQNs detected directly in the diff
+     *                                 (may include FQNs whose files were deleted)
+     * @param runAll                   whether the caller should run the full suite
      */
     public record AffectedTestsResult(
             Set<String> testClassFqns,
+            Map<String, Path> testFqnToPath,
             Set<String> changedFiles,
             Set<String> changedProductionClasses,
             Set<String> changedTestClasses,
@@ -66,28 +72,22 @@ public final class AffectedTestsEngine {
         log.info("Strategies: {}", config.strategies());
         log.info("Transitive depth: {}", config.transitiveDepth());
 
-        // Step 1: Detect changed files
         GitChangeDetector changeDetector = new GitChangeDetector(projectDir, config);
         Set<String> changedFiles = changeDetector.detectChangedFiles();
 
         if (changedFiles.isEmpty()) {
             log.info("No changed files detected.");
-            return new AffectedTestsResult(Set.of(), changedFiles, Set.of(), Set.of(),
+            return new AffectedTestsResult(Set.of(), Map.of(), changedFiles, Set.of(), Set.of(),
                     config.runAllIfNoMatches());
         }
 
-        // Step 2: Map to production and test classes
         PathToClassMapper mapper = new PathToClassMapper(config);
         MappingResult mapping = mapper.mapChangedFiles(changedFiles);
 
-        // Step 3: Discover affected tests
-        Set<String> allTestsToRun = new LinkedHashSet<>();
-
-        // Always include directly changed test files
-        allTestsToRun.addAll(mapping.testClasses());
+        Set<String> candidateTests = new LinkedHashSet<>();
+        candidateTests.addAll(mapping.testClasses());
         log.info("Directly changed test classes: {}", mapping.testClasses().size());
 
-        // Initialize strategies
         NamingConventionStrategy namingStrategy = new NamingConventionStrategy(config);
         UsageStrategy usageStrategy = new UsageStrategy(config);
         ImplementationStrategy implStrategy = new ImplementationStrategy(config, namingStrategy, usageStrategy);
@@ -95,32 +95,38 @@ public final class AffectedTestsEngine {
 
         Set<String> productionClasses = mapping.productionClasses();
 
-        // Determine which directories to search for tests.
-        // Start with the root project dir, then add cross-module mapped dirs.
-        Set<Path> searchDirs = resolveTestSearchDirs(changedFiles, mapper);
-        log.info("Test search directories: {}", searchDirs);
+        ProjectIndex index = ProjectIndex.build(projectDir, config);
 
-        // Run strategies against each search directory, building a cached index per dir
-        Map<Path, ProjectIndex> indexCache = new HashMap<>();
-        for (Path searchDir : searchDirs) {
-            ProjectIndex index = indexCache.computeIfAbsent(searchDir,
-                    dir -> ProjectIndex.build(dir, config));
+        if (config.strategies().contains(AffectedTestsConfig.STRATEGY_NAMING)) {
+            candidateTests.addAll(namingStrategy.discoverTests(productionClasses, index));
+        }
+        if (config.strategies().contains(AffectedTestsConfig.STRATEGY_USAGE)) {
+            candidateTests.addAll(usageStrategy.discoverTests(productionClasses, index));
+        }
+        if (config.strategies().contains(AffectedTestsConfig.STRATEGY_IMPL)) {
+            candidateTests.addAll(implStrategy.discoverTests(productionClasses, index));
+        }
+        if (config.strategies().contains(AffectedTestsConfig.STRATEGY_TRANSITIVE)
+                && config.transitiveDepth() > 0) {
+            candidateTests.addAll(transitiveStrategy.discoverTests(productionClasses, index));
+        }
 
-            if (config.strategies().contains("naming")) {
-                allTestsToRun.addAll(namingStrategy.discoverTests(productionClasses, index));
-            }
-            if (config.strategies().contains("usage")) {
-                allTestsToRun.addAll(usageStrategy.discoverTests(productionClasses, index));
-            }
-            if (config.strategies().contains("impl")) {
-                allTestsToRun.addAll(implStrategy.discoverTests(productionClasses, index));
-            }
-            if (config.transitiveDepth() > 0) {
-                allTestsToRun.addAll(transitiveStrategy.discoverTests(productionClasses, index));
+        // C2 guard: keep only FQNs whose source file still exists on disk.
+        // Deleted/renamed tests (their old FQN) must not be passed to Gradle's
+        // --tests flag or it will fail the whole build with "No tests found".
+        Map<String, Path> knownTests = index.testFqnToPath();
+        Set<String> allTestsToRun = new LinkedHashSet<>();
+        Map<String, Path> fqnToPath = new LinkedHashMap<>();
+        for (String fqn : candidateTests) {
+            Path file = knownTests.get(fqn);
+            if (file != null) {
+                allTestsToRun.add(fqn);
+                fqnToPath.put(fqn, file);
+            } else {
+                log.debug("Skipping FQN with no matching test file on disk: {}", fqn);
             }
         }
 
-        // Handle no-match scenario
         boolean runAll = false;
         if (allTestsToRun.isEmpty() && config.runAllIfNoMatches()) {
             log.warn("No affected tests found but runAllIfNoMatches=true. Running full suite.");
@@ -134,69 +140,11 @@ public final class AffectedTestsEngine {
 
         return new AffectedTestsResult(
                 allTestsToRun,
+                Collections.unmodifiableMap(fqnToPath),
                 changedFiles,
                 mapping.productionClasses(),
                 mapping.testClasses(),
                 runAll
         );
-    }
-
-    /**
-     * Resolves which directories to search for tests. Always includes the root project
-     * directory. When {@code testProjectMapping} is configured, also includes the
-     * mapped target module directories for any changed source modules.
-     *
-     * <p>For example, if a file in {@code api/src/main/java/...} changed and
-     * {@code testProjectMapping = {":api": ":application"}}, then the search dirs
-     * will include both the root project dir and {@code <root>/application/}.
-     */
-    private Set<Path> resolveTestSearchDirs(Set<String> changedFiles, PathToClassMapper mapper) {
-        Set<Path> dirs = new LinkedHashSet<>();
-
-        // Always search from project root (covers single-project and sub-module walks)
-        dirs.add(projectDir);
-
-        Map<String, String> mapping = config.testProjectMapping();
-        if (mapping.isEmpty()) {
-            return dirs;
-        }
-
-        // Determine which source modules had changes
-        Set<String> changedModules = new LinkedHashSet<>();
-        for (String file : changedFiles) {
-            String module = mapper.extractModule(file);
-            if (!module.isEmpty()) {
-                changedModules.add(module);
-            }
-        }
-
-        // Map source modules to test modules and add those directories
-        for (String changedModule : changedModules) {
-            // Try with and without the ":" prefix for flexibility
-            String targetModule = mapping.get(":" + changedModule);
-            if (targetModule == null) {
-                targetModule = mapping.get(changedModule);
-            }
-            if (targetModule != null) {
-                // Strip leading ":" from target module name
-                String targetDir = targetModule.startsWith(":") ? targetModule.substring(1) : targetModule;
-
-                // Validate that the resolved path stays within the project directory
-                Path targetPath = projectDir.resolve(targetDir).normalize();
-                if (!targetPath.startsWith(projectDir)) {
-                    log.error("Rejecting testProjectMapping target '{}' — resolves outside the project directory.", targetDir);
-                    continue;
-                }
-
-                if (Files.isDirectory(targetPath)) {
-                    dirs.add(targetPath);
-                    log.info("Cross-module mapping: {} -> {} ({})", changedModule, targetModule, targetPath);
-                } else {
-                    log.warn("Mapped test project directory does not exist: {}", targetPath);
-                }
-            }
-        }
-
-        return dirs;
     }
 }
