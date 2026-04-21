@@ -58,6 +58,20 @@ public abstract class AffectedTestsExtension {
     public abstract Property<Boolean> getRunAllIfNoMatches();
 
     /**
+     * Force a full test run whenever the change set contains any file that
+     * cannot be resolved to a Java class under {@link #getSourceDirs()} or
+     * {@link #getTestDirs()} — for example {@code application.yml},
+     * {@code build.gradle}, a Liquibase changelog, or a logback config.
+     * Files matching {@link #getExcludePaths()} are treated as an explicit
+     * opt-out and do not trigger the escalation.
+     *
+     * <p>Default: {@code true} — "run more, never run less".
+     *
+     * @return the run-all-on-non-java-change property
+     */
+    public abstract Property<Boolean> getRunAllOnNonJavaChange();
+
+    /**
      * Strategies to use for test discovery. Valid values:
      * {@code "naming"}, {@code "usage"}, {@code "impl"}, {@code "transitive"}.
      * Default: all four.

@@ -29,6 +29,7 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         extension.getIncludeUncommitted().convention(true);
         extension.getIncludeStaged().convention(true);
         extension.getRunAllIfNoMatches().convention(false);
+        extension.getRunAllOnNonJavaChange().convention(true);
         extension.getStrategies().convention(List.of("naming", "usage", "impl", "transitive"));
         extension.getTransitiveDepth().convention(2);
         extension.getTestSuffixes().convention(List.of("Test", "IT", "ITTest", "IntegrationTest"));
@@ -49,6 +50,7 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getIncludeUncommitted().set(extension.getIncludeUncommitted());
             task.getIncludeStaged().set(extension.getIncludeStaged());
             task.getRunAllIfNoMatches().set(extension.getRunAllIfNoMatches());
+            task.getRunAllOnNonJavaChange().set(extension.getRunAllOnNonJavaChange());
             task.getStrategies().set(extension.getStrategies());
             task.getTransitiveDepth().set(extension.getTransitiveDepth());
             task.getTestSuffixes().set(extension.getTestSuffixes());

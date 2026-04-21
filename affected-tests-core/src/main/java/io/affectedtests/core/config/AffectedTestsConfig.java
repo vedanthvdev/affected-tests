@@ -20,6 +20,7 @@ public final class AffectedTestsConfig {
     private final boolean includeUncommitted;
     private final boolean includeStaged;
     private final boolean runAllIfNoMatches;
+    private final boolean runAllOnNonJavaChange;
     private final Set<String> strategies;
     private final int transitiveDepth;
     private final List<String> testSuffixes;
@@ -34,6 +35,7 @@ public final class AffectedTestsConfig {
         this.includeUncommitted = builder.includeUncommitted;
         this.includeStaged = builder.includeStaged;
         this.runAllIfNoMatches = builder.runAllIfNoMatches;
+        this.runAllOnNonJavaChange = builder.runAllOnNonJavaChange;
         this.strategies = Set.copyOf(builder.strategies);
         this.transitiveDepth = builder.transitiveDepth;
         this.testSuffixes = List.copyOf(builder.testSuffixes);
@@ -48,6 +50,20 @@ public final class AffectedTestsConfig {
     public boolean includeUncommitted() { return includeUncommitted; }
     public boolean includeStaged() { return includeStaged; }
     public boolean runAllIfNoMatches() { return runAllIfNoMatches; }
+
+    /**
+     * Whether to force a full test run whenever the change set contains any
+     * file that cannot be resolved to a Java class under the configured
+     * {@link #sourceDirs()} or {@link #testDirs()} — for example
+     * {@code application.yml}, {@code build.gradle}, a Liquibase changelog,
+     * or a logback config. Files matching {@link #excludePaths()} are
+     * treated as an explicit opt-out and do not trigger the escalation.
+     *
+     * <p>Default: {@code true} — "run more, never run less".
+     *
+     * @return the run-all-on-non-java-change property
+     */
+    public boolean runAllOnNonJavaChange() { return runAllOnNonJavaChange; }
     public Set<String> strategies() { return strategies; }
     public int transitiveDepth() { return transitiveDepth; }
     public List<String> testSuffixes() { return testSuffixes; }
@@ -67,6 +83,7 @@ public final class AffectedTestsConfig {
         private boolean includeUncommitted = true;
         private boolean includeStaged = true;
         private boolean runAllIfNoMatches = false;
+        private boolean runAllOnNonJavaChange = true;
         private Set<String> strategies = Set.of(STRATEGY_NAMING, STRATEGY_USAGE, STRATEGY_IMPL, STRATEGY_TRANSITIVE);
         private int transitiveDepth = 2;
         private List<String> testSuffixes = List.of("Test", "IT", "ITTest", "IntegrationTest");
@@ -94,6 +111,7 @@ public final class AffectedTestsConfig {
         public Builder includeUncommitted(boolean v) { this.includeUncommitted = v; return this; }
         public Builder includeStaged(boolean v) { this.includeStaged = v; return this; }
         public Builder runAllIfNoMatches(boolean v) { this.runAllIfNoMatches = v; return this; }
+        public Builder runAllOnNonJavaChange(boolean v) { this.runAllOnNonJavaChange = v; return this; }
         public Builder strategies(Set<String> v) {
             this.strategies = Objects.requireNonNull(v, "strategies must not be null");
             return this;

@@ -1,0 +1,48 @@
+flowchart TD
+    Start(["git diff baseRef..HEAD<br/>+ uncommitted + staged"]):::io --> Changed{Any changed<br/>files?}:::core
+
+    Changed -->|no| EmptyGate{runAllIfNoMatches?}:::core
+    EmptyGate -->|true| RunAllEmpty[[runAll = true<br/>reason = RUN_ALL_ON_EMPTY_CHANGESET]]:::warn
+    EmptyGate -->|false default| Exit0[Exit 0 · skip tests]:::muted
+
+    Changed -->|yes| Mapper{{PathToClassMapper}}:::core
+
+    Mapper -->|".java under sourceDirs"| Prod[Changed production<br/>class FQNs]:::data
+    Mapper -->|".java under testDirs"| Direct[Directly changed<br/>test FQNs]:::data
+    Mapper -->|matches excludePaths| Excluded[Silently dropped<br/>explicit opt-out]:::muted
+    Mapper -->|"non-Java or .java<br/>outside configured dirs"| Unmapped[Unmapped files<br/>yaml · gradle · migrations]:::warn
+
+    Unmapped --> NonJavaGate{runAllOnNonJavaChange?}:::core
+    NonJavaGate -->|true default| RunAllNonJava[[runAll = true<br/>reason = RUN_ALL_ON_NON_JAVA_CHANGE]]:::warn
+    NonJavaGate -->|false opt-out| Skip[Silent skip<br/>legacy behaviour]:::muted
+
+    Prod --> Engine[[AffectedTestsEngine<br/>4 strategies · merged]]:::core
+    Engine --> Naming[naming<br/>Foo → FooTest / FooIT]:::strat
+    Engine --> Usage["usage<br/>JavaParser: imports + type refs"]:::strat
+    Engine --> Impl[impl<br/>subtypes of changed interfaces]:::strat
+    Engine --> Transitive[transitive<br/>reverse-dep walk · N levels]:::strat
+
+    Naming --> Union[Union of affected<br/>test class FQNs]:::data
+    Usage --> Union
+    Impl --> Union
+    Transitive --> Union
+    Direct --> Union
+
+    Union --> UnionGate{Union empty?}:::core
+    UnionGate -->|no| Router[Group FQNs by<br/>owning Gradle subproject]:::core
+    UnionGate -->|yes| DiscoveryEmptyGate{runAllIfNoMatches?}:::core
+    DiscoveryEmptyGate -->|true| RunAllDiscovery[[runAll = true<br/>reason = RUN_ALL_IF_NO_MATCHES]]:::warn
+    DiscoveryEmptyGate -->|false default| Exit0
+
+    Router --> Dispatch[":moduleA:test --tests FooTest<br/>:moduleB:test --tests BarTest"]:::io
+
+    RunAllEmpty --> FullSuite
+    RunAllNonJava --> FullSuite
+    RunAllDiscovery --> FullSuite["gradle test<br/>full suite · no --tests filter"]:::io
+
+    classDef io fill:#1f2937,color:#f9fafb,stroke:#374151,stroke-width:1px
+    classDef core fill:#1d4ed8,color:#ffffff,stroke:#1e3a8a,stroke-width:1px
+    classDef data fill:#047857,color:#ffffff,stroke:#064e3b,stroke-width:1px
+    classDef strat fill:#0e7490,color:#ffffff,stroke:#155e75,stroke-width:1px
+    classDef warn fill:#b45309,color:#ffffff,stroke:#78350f,stroke-width:1px
+    classDef muted fill:#4b5563,color:#e5e7eb,stroke:#374151,stroke-width:1px

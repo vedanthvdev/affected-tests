@@ -2,6 +2,7 @@ package io.affectedtests.gradle;
 
 import io.affectedtests.core.AffectedTestsEngine;
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
+import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
@@ -23,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -85,6 +87,19 @@ public abstract class AffectedTestTask extends DefaultTask {
      */
     @Input
     public abstract Property<Boolean> getRunAllIfNoMatches();
+
+    /**
+     * Whether to force a full test run when the change set contains any
+     * file that cannot be resolved to a Java class under the configured
+     * source/test directories (e.g. {@code application.yml},
+     * {@code build.gradle}, a Liquibase changelog). Excluded paths are
+     * honoured and do not trigger the escalation.
+     * Default: {@code true} — "run more, never run less".
+     *
+     * @return the run-all-on-non-java-change property
+     */
+    @Input
+    public abstract Property<Boolean> getRunAllOnNonJavaChange();
 
     /**
      * Discovery strategies to use for finding affected tests.
@@ -200,6 +215,7 @@ public abstract class AffectedTestTask extends DefaultTask {
                 .includeUncommitted(getIncludeUncommitted().get())
                 .includeStaged(getIncludeStaged().get())
                 .runAllIfNoMatches(getRunAllIfNoMatches().get())
+                .runAllOnNonJavaChange(getRunAllOnNonJavaChange().get())
                 .strategies(new LinkedHashSet<>(getStrategies().get()))
                 .transitiveDepth(getTransitiveDepth().get())
                 .testSuffixes(getTestSuffixes().get())
@@ -213,17 +229,25 @@ public abstract class AffectedTestTask extends DefaultTask {
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
 
-        getLogger().lifecycle("Affected Tests: {} changed files, {} production classes, {} test classes affected",
-                result.changedFiles().size(),
-                result.changedProductionClasses().size(),
-                result.testClassFqns().size());
+        // The summary line is the single place the task names the trigger;
+        // downstream lines must not repeat the reason or CI logs drift into
+        // contradictory duplicate phrasing. We hand the logger a format
+        // string + args pair instead of a pre-formatted string so any future
+        // phrase containing `{` or `}` characters (Liquibase file names,
+        // JSONpath expressions) renders literally rather than silently
+        // disappearing into the placeholder parser.
+        LogLine summary = renderSummary(result);
+        getLogger().lifecycle(summary.format(), summary.args());
 
         if (result.testClassFqns().isEmpty() && !result.runAll()) {
             getLogger().lifecycle("No affected tests to run. Skipping test execution.");
             return;
         }
 
-        executeTests(projectDir, result.testClassFqns(), result.testFqnToPath(), result.runAll());
+        executeTests(projectDir,
+                result.testClassFqns(),
+                result.testFqnToPath(),
+                result.runAll());
     }
 
     private void executeTests(Path projectDir,
@@ -235,8 +259,15 @@ public abstract class AffectedTestTask extends DefaultTask {
         List<String> args = new ArrayList<>();
         args.add(gradleCommand);
 
-        if (runAll || testFqns.isEmpty()) {
-            getLogger().lifecycle("Running ALL tests (runAllIfNoMatches=true).");
+        // The previous `runAll || testFqns.isEmpty()` disjunct was stale:
+        // the guard in runAffectedTests above already returned when the set
+        // was empty and runAll was false, so by the time we reach this branch
+        // testFqns.isEmpty() can only be true under runAll.
+        if (runAll) {
+            // Reason already printed by renderSummary in the caller; keeping
+            // it out of this line prevents the "log prints the same phrase
+            // twice" grep collision on the "Running ALL tests" marker.
+            getLogger().lifecycle("Running ALL tests.");
             args.add("test");
         } else {
             // Group FQNs by owning subproject and emit ":moduleA:test --tests x
@@ -355,5 +386,92 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     private static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    /**
+     * A lifecycle log line expressed as an SLF4J-style format string plus
+     * its positional arguments, so the caller can hand both to
+     * {@link org.gradle.api.logging.Logger#lifecycle(String, Object...)}
+     * and benefit from Gradle's placeholder parser — keeping this task
+     * consistent with the other {@code lifecycle(...)} call-sites in the
+     * file, and preventing any future phrase containing literal {@code {}}
+     * from being swallowed by that parser.
+     *
+     * <p>Package-private so the log-shape test can assert on either the
+     * format string or the rendered output without pulling in Gradle's
+     * live logger.
+     */
+    record LogLine(String format, Object[] args) {
+        LogLine {
+            Objects.requireNonNull(format, "format");
+            Objects.requireNonNull(args, "args");
+            // Defensive copy — otherwise a caller that mutates the array
+            // after construction would change the rendered log line.
+            // Cheap (always small), and stops the "Object[] component in
+            // a record is secretly shared state" class of bugs dead.
+            args = args.clone();
+        }
+
+        @Override
+        public Object[] args() {
+            return args.clone();
+        }
+    }
+
+    /**
+     * Renders an {@link EscalationReason} as a short human-readable phrase
+     * suitable for a lifecycle log line. Package-private so the log-shape
+     * test can pin the exact wording; kept in one place so the summary and
+     * any downstream "Running ALL tests" lines cannot drift into
+     * contradictory phrasing.
+     *
+     * <p>{@link EscalationReason#NONE} is rejected: this helper is called
+     * only on {@code runAll} results, and a {@code runAll=true + NONE}
+     * combination is an engine bug rather than a log-formatting concern.
+     * Throwing here ensures such a drift is loud (build fails) instead of
+     * silently surfacing a placeholder phrase to CI.
+     */
+    static String describeEscalation(EscalationReason reason) {
+        Objects.requireNonNull(reason, "reason");
+        return switch (reason) {
+            case RUN_ALL_ON_NON_JAVA_CHANGE ->
+                    "runAllOnNonJavaChange=true — non-Java or unmapped file in diff";
+            case RUN_ALL_ON_EMPTY_CHANGESET ->
+                    "runAllIfNoMatches=true — no changed files detected";
+            case RUN_ALL_IF_NO_MATCHES ->
+                    "runAllIfNoMatches=true — no affected tests discovered";
+            case NONE -> throw new IllegalStateException(
+                    "describeEscalation must not be called for EscalationReason.NONE; "
+                            + "the engine should only produce NONE on non-runAll results");
+        };
+    }
+
+    /**
+     * Builds the single summary line printed to Gradle's lifecycle log for
+     * every {@code affectedTest} run. The runAll branch names the real
+     * trigger (so "0 production classes, 0 test classes affected" never
+     * sits next to "running full suite"), and non-runAll runs emit the
+     * selection counts the downstream test dispatch will honour.
+     *
+     * <p>Pluralisation is deliberately fixed to {@code file(s)},
+     * {@code class(es)}, and {@code class(es)} on both branches so CI
+     * greps stay stable across runs with different selection sizes.
+     */
+    static LogLine renderSummary(AffectedTestsResult result) {
+        if (result.runAll()) {
+            return new LogLine(
+                    "Affected Tests: {} changed file(s); running full suite ({}).",
+                    new Object[] {
+                            result.changedFiles().size(),
+                            describeEscalation(result.escalationReason())
+                    });
+        }
+        return new LogLine(
+                "Affected Tests: {} changed file(s), {} production class(es), {} test class(es) affected",
+                new Object[] {
+                        result.changedFiles().size(),
+                        result.changedProductionClasses().size(),
+                        result.testClassFqns().size()
+                });
     }
 }

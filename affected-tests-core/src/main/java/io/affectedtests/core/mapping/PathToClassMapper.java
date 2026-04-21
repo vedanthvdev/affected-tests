@@ -30,12 +30,20 @@ public final class PathToClassMapper {
 
     /**
      * Result of mapping changed files: production classes and test classes.
+     *
+     * <p>{@link #unmappedChangedFiles()} captures paths that a Java-source
+     * walk cannot interpret — typically non-Java files (YAML, build scripts,
+     * Liquibase migrations) but also any {@code .java} file outside the
+     * configured source/test directories. Files matched by
+     * {@link AffectedTestsConfig#excludePaths()} are deliberately omitted so
+     * that explicit opt-outs stay silent.
      */
     public record MappingResult(
             Set<String> productionClasses,
             Set<String> testClasses,
             Set<String> changedProductionFiles,
-            Set<String> changedTestFiles
+            Set<String> changedTestFiles,
+            Set<String> unmappedChangedFiles
     ) {}
 
     /**
@@ -49,15 +57,18 @@ public final class PathToClassMapper {
         Set<String> testClasses = new LinkedHashSet<>();
         Set<String> changedProductionFiles = new LinkedHashSet<>();
         Set<String> changedTestFiles = new LinkedHashSet<>();
+        Set<String> unmappedChangedFiles = new LinkedHashSet<>();
 
         for (String filePath : changedFiles) {
-            if (!filePath.endsWith(".java")) {
-                log.debug("Skipping non-Java file: {}", filePath);
+            if (isExcluded(filePath)) {
+                // Explicit opt-out — stay silent and do not treat as unmapped.
+                log.debug("Excluded by pattern: {}", filePath);
                 continue;
             }
 
-            if (isExcluded(filePath)) {
-                log.debug("Excluded by pattern: {}", filePath);
+            if (!filePath.endsWith(".java")) {
+                log.debug("Non-Java file flagged as unmapped: {}", filePath);
+                unmappedChangedFiles.add(filePath);
                 continue;
             }
 
@@ -79,21 +90,32 @@ public final class PathToClassMapper {
                 continue;
             }
 
-            log.debug("File not under any known source dir: {}", filePath);
+            // A .java file outside the configured source/test dirs — still
+            // unmappable, still a potential safety escalation trigger.
+            log.debug("Java file outside configured source/test dirs flagged as unmapped: {}", filePath);
+            unmappedChangedFiles.add(filePath);
         }
 
-        log.info("Mapped {} production classes and {} test classes from {} changed files",
-                productionClasses.size(), testClasses.size(), changedFiles.size());
+        log.info("Mapped {} production classes and {} test classes from {} changed files ({} unmapped)",
+                productionClasses.size(), testClasses.size(), changedFiles.size(), unmappedChangedFiles.size());
 
-        return new MappingResult(productionClasses, testClasses, changedProductionFiles, changedTestFiles);
+        return new MappingResult(productionClasses, testClasses,
+                changedProductionFiles, changedTestFiles, unmappedChangedFiles);
     }
 
     /**
      * Tries to map a file path to an FQN given a list of source directories.
      * Handles multi-module paths like "module/src/main/java/com/example/Foo.java".
+     *
+     * <p>Matching is <em>boundary-aware</em> — the source dir must either
+     * start the path or be preceded by {@code '/'}. A plain
+     * {@code indexOf(sourceDir)} would happily pick up
+     * {@code "notsrc/main/java/Foo.java"} and classify it as production
+     * {@code Foo}, which in turn would keep it out of the "unmapped"
+     * bucket that drives the {@code runAllOnNonJavaChange} safety net —
+     * exactly the silent-skip behaviour that flag exists to prevent.
      */
     private String tryMapToClass(String filePath, java.util.List<String> sourceDirs) {
-        // Normalize path separators
         String normalized = filePath.replace('\\', '/');
 
         for (String sourceDir : sourceDirs) {
@@ -102,15 +124,22 @@ public final class PathToClassMapper {
                 normalizedDir += "/";
             }
 
-            int idx = normalized.indexOf(normalizedDir);
-            if (idx >= 0) {
-                String relativePath = normalized.substring(idx + normalizedDir.length());
-                // Remove .java extension and convert path to FQN
-                if (relativePath.endsWith(".java")) {
-                    relativePath = relativePath.substring(0, relativePath.length() - 5);
+            int idx;
+            if (normalized.startsWith(normalizedDir)) {
+                idx = 0;
+            } else {
+                int boundary = normalized.indexOf("/" + normalizedDir);
+                if (boundary < 0) {
+                    continue;
                 }
-                return relativePath.replace('/', '.');
+                idx = boundary + 1;
             }
+
+            String relativePath = normalized.substring(idx + normalizedDir.length());
+            if (relativePath.endsWith(".java")) {
+                relativePath = relativePath.substring(0, relativePath.length() - 5);
+            }
+            return relativePath.replace('/', '.');
         }
         return null;
     }
