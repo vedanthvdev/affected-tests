@@ -58,8 +58,22 @@ affectedTests {
     includeUncommitted = true
     includeStaged = true
 
-    // Run full suite if no matches found (default: false)
+    // Run the full suite whenever there is nothing specific to run — either
+    // because the diff produced no changed files at all OR because discovery
+    // ran and returned an empty set. The two branches produce distinct
+    // escalation reasons in the CI log so an operator can tell them apart.
+    // Default: false (skip tests silently in both cases).
     runAllIfNoMatches = false
+
+    // Force a full run when the diff contains any file we cannot resolve to
+    // a Java class under sourceDirs/testDirs. This covers both non-Java
+    // resources (application.yml, build.gradle, Liquibase changelogs,
+    // logback config) AND stray .java files living outside the configured
+    // source/test dirs (e.g. buildSrc sources when buildSrc is not in
+    // sourceDirs). Excluded paths are honoured and do not trigger the
+    // escalation. This is independent of runAllIfNoMatches — the two
+    // safety nets fire on different conditions. Default: true.
+    runAllOnNonJavaChange = true
 
     // Discovery strategies: "naming", "usage", "impl", "transitive" (default: all four)
     strategies = ["naming", "usage", "impl", "transitive"]
@@ -90,26 +104,13 @@ affectedTests {
 
 ## How It Works
 
-```
-1. DETECT CHANGES
-   git diff <baseRef> HEAD + uncommitted/staged
-   → list of changed file paths
+The pipeline is four stages: **detect** what changed, **map** each path to a Java class (or declare it unmappable), **discover** the tests impacted by those classes, and **execute** only that subset — or the full suite if safety rules demand it.
 
-2. MAP TO CLASSES
-   Filter *.java files under configured source/test directories
-   → production class FQNs + test class FQNs
+<p align="center">
+  <img src="docs/architecture.svg" alt="Affected Tests architecture: git diff feeds PathToClassMapper, which routes Java files into 4 discovery strategies for per-module test dispatch; two safety gates (runAllIfNoMatches on empty changesets or empty discovery, runAllOnNonJavaChange on unmapped files) escalate to a full run" width="100%">
+</p>
 
-3. DISCOVER AFFECTED TESTS (all strategies run in parallel)
-   Strategy A: Naming convention
-   Strategy B: Usage / import scanning
-   Strategy C: Implementation discovery
-   Strategy D: Reverse transitive dependencies
-   → union of all discovered test class FQNs
-
-4. RUN TESTS
-   ./gradlew test --tests "com.example.FooTest" --tests "..."
-   → only affected tests execute
-```
+<sub>Source: [`docs/architecture.mmd`](docs/architecture.mmd) · regenerate with `npx --yes @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/architecture.svg -b transparent`</sub>
 
 ### Discovery Strategies
 
@@ -149,10 +150,15 @@ This makes `--tests` filters scope cleanly to their owning module, instead of be
 
 | Scenario | Default behavior |
 |----------|-----------------|
-| No changed Java files | Exit 0, skip tests |
-| No matching tests found | Exit 0 (or run full suite if `runAllIfNoMatches = true`) |
+| Change set contains only mapped Java sources | Run the filtered set of affected tests |
+| Change set contains any non-Java or unmapped file — YAML, Gradle, Liquibase, logback, **or a `.java` file outside the configured `sourceDirs`/`testDirs`** | **Run the full test suite** (via `runAllOnNonJavaChange = true`) — opt out with `runAllOnNonJavaChange = false` to restore silent skip |
+| No changed files at all | Exit 0 (or run full suite if `runAllIfNoMatches = true`) — reported to CI as `runAllIfNoMatches=true — no changed files detected`, distinct from the "discovery ran and found nothing" case below |
+| No matching tests found after discovery | Exit 0 (or run full suite if `runAllIfNoMatches = true`) — reported to CI as `runAllIfNoMatches=true — no affected tests discovered` |
+| Changed file matches an entry in `excludePaths` | Silently ignored — excluded paths are an explicit opt-out and never trigger the non-Java escalation |
 | Base ref not found | **Fails with clear error** (prevents silent test skipping in CI) |
 | Git not available | **Fails with clear error** |
+
+The `runAllOnNonJavaChange` default follows the "run more, never run less" principle: a change to `application.yml` can alter production behaviour just as surely as a change to a `.java` file, so the plugin cannot safely pick a subset from an empty Java mapping. Projects that prefer the older "silent skip" behaviour can set `runAllOnNonJavaChange = false`.
 
 ## Project Structure
 
@@ -160,6 +166,9 @@ This makes `--tests` filters scope cleanly to their owning module, instead of be
 affected-tests/
 ├── affected-tests-core/          # Git integration, change detection, test discovery
 ├── affected-tests-gradle/        # Gradle plugin (io.github.vedanthvdev.affectedtests)
+├── docs/
+│   ├── architecture.mmd          # Mermaid source for the architecture diagram
+│   └── architecture.svg          # Rendered diagram embedded in README
 ├── build.gradle
 ├── settings.gradle
 └── README.md

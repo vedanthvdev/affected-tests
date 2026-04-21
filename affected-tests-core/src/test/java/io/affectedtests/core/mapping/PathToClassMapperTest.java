@@ -44,7 +44,7 @@ class PathToClassMapperTest {
     }
 
     @Test
-    void skipsNonJavaFiles() {
+    void nonJavaFilesAreRecordedAsUnmapped() {
         Set<String> changed = Set.of(
                 "README.md",
                 "build.gradle",
@@ -54,6 +54,52 @@ class PathToClassMapperTest {
 
         assertTrue(result.productionClasses().isEmpty());
         assertTrue(result.testClasses().isEmpty());
+        assertEquals(changed, result.unmappedChangedFiles(),
+                "Non-Java files must be surfaced as unmapped so the engine can escalate to runAll");
+    }
+
+    @Test
+    void javaFileOutsideConfiguredDirsIsUnmapped() {
+        // A .java file that does not sit under any configured source or test
+        // directory (e.g. a root-level scratch file or a docs/examples path)
+        // can still affect runtime behaviour, so it must be surfaced as
+        // unmapped rather than silently dropped.
+        Set<String> changed = Set.of("docs/examples/Snippet.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().isEmpty());
+        assertTrue(result.testClasses().isEmpty());
+        assertEquals(changed, result.unmappedChangedFiles());
+    }
+
+    @Test
+    void excludedFilesAreNotReportedAsUnmapped() {
+        // Explicit opt-out must stay silent — an excluded file is neither
+        // mapped nor flagged as unmapped.
+        AffectedTestsConfig excludeConfig = AffectedTestsConfig.builder()
+                .excludePaths(java.util.List.of("**/generated/**"))
+                .build();
+        PathToClassMapper excludeMapper = new PathToClassMapper(excludeConfig);
+
+        Set<String> changed = Set.of("src/main/java/generated/Stub.java");
+        MappingResult result = excludeMapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().isEmpty());
+        assertTrue(result.testClasses().isEmpty());
+        assertTrue(result.unmappedChangedFiles().isEmpty(),
+                "Excluded files must not trigger the runAll escalation");
+    }
+
+    @Test
+    void mappedJavaFilesDoNotAppearAsUnmapped() {
+        Set<String> changed = Set.of(
+                "src/main/java/com/example/Foo.java",
+                "src/test/java/com/example/FooTest.java"
+        );
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.unmappedChangedFiles().isEmpty(),
+                "Properly mapped Java sources must not leak into the unmapped bucket");
     }
 
     @Test
@@ -92,5 +138,48 @@ class PathToClassMapperTest {
     void extractModuleHandlesNestedPaths() {
         assertEquals("services/core-api",
                 mapper.extractModule("services/core-api/src/main/java/com/example/Foo.java"));
+    }
+
+    @Test
+    void tryMapToClassRequiresBoundaryBeforeSourceDir() {
+        // Regression: a plain indexOf("src/main/java/") treats
+        // "notsrc/main/java/Foo.java" as a production hit and classifies
+        // it as FQN "Foo". That would silently swallow the file — it
+        // would neither appear in changedProductionFiles (no real Java
+        // sitting under our configured dirs) nor in unmappedChangedFiles
+        // (which drives the runAllOnNonJavaChange safety net), defeating
+        // the whole "run more, never less" guarantee.
+        Set<String> changed = Set.of("notsrc/main/java/Foo.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().isEmpty(),
+                "A path whose source-dir-like prefix is a substring of some other directory "
+                        + "must not be mis-classified as production");
+        assertTrue(result.testClasses().isEmpty());
+        assertEquals(changed, result.unmappedChangedFiles(),
+                "The boundary-violating path must land in the unmapped bucket so the engine "
+                        + "can escalate to runAll under the default safety policy");
+    }
+
+    @Test
+    void tryMapToClassHandlesSourceDirAsPathPrefix() {
+        // Positive counterpart to the boundary test: when the source dir
+        // *does* start the path, matching must still succeed.
+        Set<String> changed = Set.of("src/main/java/com/example/Foo.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().contains("com.example.Foo"));
+        assertTrue(result.unmappedChangedFiles().isEmpty());
+    }
+
+    @Test
+    void tryMapToClassHandlesSourceDirAfterModulePrefix() {
+        // Positive counterpart: when the source dir is preceded by a `/`
+        // (standard multi-module layout), matching must still succeed.
+        Set<String> changed = Set.of("api-gateway/src/main/java/com/example/Foo.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().contains("com.example.Foo"));
+        assertTrue(result.unmappedChangedFiles().isEmpty());
     }
 }

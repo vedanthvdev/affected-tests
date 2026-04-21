@@ -40,6 +40,35 @@ public final class AffectedTestsEngine {
     }
 
     /**
+     * Why a result flipped to {@code runAll = true}, or {@link #NONE} when no
+     * escalation occurred. Callers (notably the Gradle task) use this to log
+     * an accurate trigger name — without it, any escalation would have to be
+     * attributed to a single hard-coded flag, which misleads users once
+     * multiple escalation paths exist.
+     */
+    public enum EscalationReason {
+        /** No escalation — either a filtered selection or a plain "nothing to do" result. */
+        NONE,
+        /**
+         * Git produced an empty change set (no files differ between
+         * {@code baseRef} and the working tree) and {@code runAllIfNoMatches}
+         * was true. Distinct from {@link #RUN_ALL_IF_NO_MATCHES} because
+         * discovery never actually ran, and the lifecycle log must say so
+         * rather than claim "no affected tests discovered".
+         */
+        RUN_ALL_ON_EMPTY_CHANGESET,
+        /** Discovery completed, returned an empty test set, and {@code runAllIfNoMatches} was true. */
+        RUN_ALL_IF_NO_MATCHES,
+        /**
+         * The change set contained at least one file the mapper could not
+         * resolve to a Java class under the configured source/test
+         * directories (e.g. {@code application.yml}, {@code build.gradle}),
+         * and {@code runAllOnNonJavaChange} was true.
+         */
+        RUN_ALL_ON_NON_JAVA_CHANGE
+    }
+
+    /**
      * Result of the affected tests analysis.
      *
      * @param testClassFqns            FQNs of tests that should be executed
@@ -52,6 +81,8 @@ public final class AffectedTestsEngine {
      * @param changedTestClasses       test FQNs detected directly in the diff
      *                                 (may include FQNs whose files were deleted)
      * @param runAll                   whether the caller should run the full suite
+     * @param escalationReason         tag describing why {@code runAll} flipped,
+     *                                 or {@link EscalationReason#NONE} when it did not
      */
     public record AffectedTestsResult(
             Set<String> testClassFqns,
@@ -59,7 +90,8 @@ public final class AffectedTestsEngine {
             Set<String> changedFiles,
             Set<String> changedProductionClasses,
             Set<String> changedTestClasses,
-            boolean runAll
+            boolean runAll,
+            EscalationReason escalationReason
     ) {}
 
     /**
@@ -77,12 +109,37 @@ public final class AffectedTestsEngine {
 
         if (changedFiles.isEmpty()) {
             log.info("No changed files detected.");
+            boolean runAll = config.runAllIfNoMatches();
+            // Distinct reason from the post-discovery empty path: discovery
+            // never ran here, so the task log must not claim "no affected
+            // tests discovered" when in fact nothing was ever looked at.
             return new AffectedTestsResult(Set.of(), Map.of(), changedFiles, Set.of(), Set.of(),
-                    config.runAllIfNoMatches());
+                    runAll,
+                    runAll ? EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET : EscalationReason.NONE);
         }
 
         PathToClassMapper mapper = new PathToClassMapper(config);
         MappingResult mapping = mapper.mapChangedFiles(changedFiles);
+
+        // Safety escalation: if the caller opted in (default) and any changed
+        // file cannot be mapped to a Java class under the configured source
+        // dirs — typically application.yml, build.gradle, a Liquibase
+        // changelog, a logback config — we refuse to pick a subset. The
+        // motto is "run more, never run less": the filtered set is empty and
+        // runAll is true so the downstream task executes the whole suite.
+        if (config.runAllOnNonJavaChange() && !mapping.unmappedChangedFiles().isEmpty()) {
+            log.warn("Non-Java / unmapped change detected ({} file(s)). Forcing full test suite. Examples: {}",
+                    mapping.unmappedChangedFiles().size(),
+                    mapping.unmappedChangedFiles().stream().limit(5).toList());
+            return new AffectedTestsResult(
+                    Set.of(),
+                    Map.of(),
+                    changedFiles,
+                    mapping.productionClasses(),
+                    mapping.testClasses(),
+                    true,
+                    EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+        }
 
         Set<String> candidateTests = new LinkedHashSet<>();
         candidateTests.addAll(mapping.testClasses());
@@ -128,9 +185,11 @@ public final class AffectedTestsEngine {
         }
 
         boolean runAll = false;
+        EscalationReason reason = EscalationReason.NONE;
         if (allTestsToRun.isEmpty() && config.runAllIfNoMatches()) {
             log.warn("No affected tests found but runAllIfNoMatches=true. Running full suite.");
             runAll = true;
+            reason = EscalationReason.RUN_ALL_IF_NO_MATCHES;
         } else if (allTestsToRun.isEmpty()) {
             log.info("No affected tests found. Nothing to run.");
         }
@@ -144,7 +203,8 @@ public final class AffectedTestsEngine {
                 changedFiles,
                 mapping.productionClasses(),
                 mapping.testClasses(),
-                runAll
+                runAll,
+                reason
         );
     }
 }

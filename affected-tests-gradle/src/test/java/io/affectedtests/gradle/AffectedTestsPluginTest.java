@@ -38,6 +38,11 @@ class AffectedTestsPluginTest {
         assertTrue(ext.getIncludeUncommitted().get());
         assertTrue(ext.getIncludeStaged().get());
         assertFalse(ext.getRunAllIfNoMatches().get());
+        // The "run more, never run less" default: any non-Java or unmapped file
+        // in the diff must escalate to a full suite. Flipping this default
+        // silently would be a material behaviour change, so pin it in a test.
+        assertTrue(ext.getRunAllOnNonJavaChange().get(),
+                "runAllOnNonJavaChange must default to true to preserve the safety escalation");
         // Defaults: naming, usage, impl, transitive — transitive is gated by the
         // strategies list (see I9 in the review), not just by transitiveDepth.
         assertEquals(4, ext.getStrategies().get().size());
@@ -70,11 +75,14 @@ class AffectedTestsPluginTest {
                 .getByType(AffectedTestsExtension.class);
         ext.getBaseRef().set("origin/main");
         ext.getTransitiveDepth().set(0);
+        ext.getRunAllOnNonJavaChange().set(false);
 
         // Verify task picks up the change
         AffectedTestTask task = (AffectedTestTask) project.getTasks().findByName("affectedTest");
         assertNotNull(task);
         assertEquals("origin/main", task.getBaseRef().get());
         assertEquals(0, task.getTransitiveDepth().get());
+        assertFalse(task.getRunAllOnNonJavaChange().get(),
+                "Task input must reflect the extension's runAllOnNonJavaChange override");
     }
 }
