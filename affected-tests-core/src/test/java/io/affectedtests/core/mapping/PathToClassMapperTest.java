@@ -327,6 +327,54 @@ class PathToClassMapperTest {
     }
 
     @Test
+    void unparseablePathNameDoesNotCrashIsIgnored() {
+        // Regression for the InvalidPathException catch in isIgnored.
+        // The JDK's default FileSystem rejects paths containing a NUL
+        // byte on every platform, so "src/main/java/com/example/Foo\0"
+        // is the portable way to exercise the branch. Before the
+        // catch existed, any such filename arriving in a diff —
+        // surfacing as a CVE-style probe or as a cross-platform-
+        // checkout artifact — blew up the whole task with an
+        // unhandled InvalidPathException; now it routes through the
+        // unmapped bucket and the safety net picks it up.
+        String malformed = "src/main/java/com/example/Foo\u0000";
+        Set<String> changed = Set.of(malformed);
+
+        assertDoesNotThrow(() -> mapper.mapChangedFiles(changed),
+                "Unparseable path names must not crash the mapper");
+
+        MappingResult result = mapper.mapChangedFiles(changed);
+        assertTrue(result.ignoredFiles().isEmpty(),
+                "An unparseable path cannot be matched against any ignore glob");
+        // The .java suffix survives the NUL byte in the string so the
+        // mapper still attempts the source-dir mapping. What this test
+        // locks in is the *absence of a crash*, not the final bucket.
+    }
+
+    @Test
+    void malformedIgnorePathsGlobFailsWithHelpfulMessage() {
+        // Parity test with OutOfScopeMatchersTest — the out-of-scope
+        // path had a regression test for malformed globs since
+        // v1.9.16, but the ignorePaths compile path, which uses the
+        // same IAE-catching shape, did not. Lock in that a user
+        // writing a bracket expression they forgot to close gets a
+        // message pointing at ignorePaths[index] and the specific
+        // entry, not a raw PatternSyntaxException stacktrace.
+        AffectedTestsConfig badConfig = AffectedTestsConfig.builder()
+                .ignorePaths(java.util.List.of("**/valid/**", "**/broken["))
+                .build();
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new PathToClassMapper(badConfig));
+
+        String message = error.getMessage();
+        assertTrue(message.contains("ignorePaths[1]"),
+                "Error message must identify which entry is broken, got: " + message);
+        assertTrue(message.contains("'**/broken['"),
+                "Error message must quote the offending entry, got: " + message);
+    }
+
+    @Test
     void tryMapToClassHandlesSourceDirAfterModulePrefix() {
         // Positive counterpart: when the source dir is preceded by a `/`
         // (standard multi-module layout), matching must still succeed.

@@ -58,6 +58,51 @@ adheres to [Semantic Versioning](https://semver.org/).
   malformed-glob error path is now the single source of truth for
   `Affected Tests: invalid glob at outOfScope*Dirs[N]` messages.
 
+### Fixed — post-v1.9.16 review batch
+
+- `GitChangeDetector.uncommittedChanges` and `stagedChanges` now
+  surface `DELETE` entries through the old path, the same way
+  `committedChanges` has since v1.9.16. The v1.9.16 release patched
+  the committed branch only, which was inert under its own
+  committed-only defaults but re-opened the silent-skip hole the
+  moment any adopter flipped `includeUncommitted` or `includeStaged`
+  back on to iterate on a local `git rm`. All three diff sources
+  now share one `collectPaths` helper so future bucketing changes
+  can't drift between them.
+- Regression tests added for the previously-untested error branches:
+  `GitChangeDetector`'s shallow-clone `MissingObjectException` hint,
+  `PathToClassMapper.isIgnored`'s `InvalidPathException` guard (NUL
+  bytes and friends), and the config-time error message for
+  malformed globs in `ignorePaths`. No code change — only coverage
+  for branches whose existing behaviour the batch-1 fix relied on.
+
+### Documentation
+
+- `AffectedTestTask.getTransitiveDepth()` Javadoc now documents the
+  actual default of `4` with rationale. The v1.9.16 pass updated
+  `TransitiveStrategy` and `AffectedTestsExtension` but missed this
+  third site — consumers reading `AffectedTestTask` Javadoc were
+  still being told they needed to set `transitiveDepth = 4`
+  explicitly; they do not.
+- `OutOfScopeMatchers` class Javadoc replaces the Javadoc-safe
+  `&#42;&#42;` escapes with literal `**` inside `{@code}` (the
+  comment-terminator was never a risk — only `*/` is, and `{@code}`
+  only cares about matching braces). The opening brace still has to
+  be escaped because Javadoc closes `{@code}` at the first `}`; a
+  one-line comment now explains why the escape is unavoidable.
+- `OutOfScopeMatchers.hasGlobMetachar` now documents why only the
+  opening forms `[` and `{` are treated as glob indicators — a
+  literal directory name that happens to contain an unbalanced `]`
+  or `}` is a far more likely reality than a user meaning "glob",
+  and promoting it to glob compilation would convert
+  typo-in-literal into a build-breaking glob syntax error.
+- `AffectedTestTask.JAVA_FQN` now documents the intentional
+  non-validation of Java reserved words. An FQN shaped like a
+  keyword can't be produced by the discovery strategies (they read
+  real filenames); the only way one reaches the filter is
+  adversarially, and Gradle's downstream `--tests` matcher reports
+  "no tests found" for it — never a compile failure or RCE.
+
 ### Fixed — post-v1.9.15 review batch
 
 - `outOfScopeTestDirs` / `outOfScopeSourceDirs` glob entries now work

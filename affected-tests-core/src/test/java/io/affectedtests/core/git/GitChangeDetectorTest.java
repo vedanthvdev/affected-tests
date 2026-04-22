@@ -184,6 +184,117 @@ class GitChangeDetectorTest {
     }
 
     @Test
+    void detectsUncommittedDeletesByOldPath() throws Exception {
+        // Symmetric regression: the committed branch started surfacing
+        // DELETEs in batch-1, but uncommittedChanges still filtered
+        // anything whose newPath was /dev/null. With the v1.9.15
+        // committed-only defaults this hole was inert, but any adopter
+        // iterating on a local `git rm`-before-commit with
+        // includeUncommitted = true would see their MR route through
+        // EMPTY_DIFF → SKIPPED under LOCAL/CI mode. Lock in that the
+        // unstaged deletion now flows through the normal bucketing.
+        try (Git git = initRepoWithInitialCommit()) {
+            File doomed = tempDir.resolve("src/main/java/com/example/Doomed.java").toFile();
+            doomed.getParentFile().mkdirs();
+            Files.writeString(doomed.toPath(), "package com.example;\npublic class Doomed {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add Doomed").call();
+
+            String baseCommit = git.log().call().iterator().next().getName();
+
+            // Delete on disk without staging — this is the
+            // "uncommitted" diff that JGit's plain git.diff().call()
+            // surfaces.
+            assertTrue(doomed.delete(), "fixture precondition");
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(baseCommit)
+                    .includeUncommitted(true)
+                    .includeStaged(false)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+            Set<String> changed = detector.detectChangedFiles();
+
+            assertTrue(changed.contains("src/main/java/com/example/Doomed.java"),
+                    "Uncommitted deletion must surface through its old path");
+        }
+    }
+
+    @Test
+    void detectsStagedDeletesByOldPath() throws Exception {
+        // Same regression as above, on the staged diff source. A
+        // developer running `git rm foo.java` without committing puts
+        // the deletion in the index, and includeStaged = true must see
+        // it for the same reasons the committed branch does.
+        try (Git git = initRepoWithInitialCommit()) {
+            File doomed = tempDir.resolve("src/main/java/com/example/Doomed.java").toFile();
+            doomed.getParentFile().mkdirs();
+            Files.writeString(doomed.toPath(), "package com.example;\npublic class Doomed {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add Doomed").call();
+
+            String baseCommit = git.log().call().iterator().next().getName();
+
+            // git rm — the deletion is staged in the index.
+            git.rm().addFilepattern("src/main/java/com/example/Doomed.java").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(baseCommit)
+                    .includeUncommitted(false)
+                    .includeStaged(true)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+            Set<String> changed = detector.detectChangedFiles();
+
+            assertTrue(changed.contains("src/main/java/com/example/Doomed.java"),
+                    "Staged deletion must surface through its old path");
+        }
+    }
+
+    @Test
+    void explainsShallowCloneWhenBaseObjectMissing() throws Exception {
+        // Regression for the MissingObjectException branch added in
+        // batch-1. Instead of spinning up a shallow clone (slow and
+        // relies on system git), we synthesise the exact JGit state a
+        // shallow clone produces at the parseCommit call site: a ref
+        // that resolves cleanly to an ObjectId whose underlying commit
+        // object is not in the local pack. The resolve step succeeds
+        // (so we do not hit the "could not resolve baseRef" branch
+        // earlier in the chain), but parseCommit throws
+        // MissingObjectException the moment we try to walk the tree.
+        try (Git git = initRepoWithInitialCommit()) {
+            File refsHeads = tempDir.resolve(".git/refs/heads").toFile();
+            assertTrue(refsHeads.exists() || refsHeads.mkdirs(), "fixture precondition");
+            // Any syntactically valid 40-char hex string that is not a
+            // real object in this repo's object store triggers the
+            // MissingObjectException at parseCommit time.
+            String bogusSha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+            Files.writeString(new File(refsHeads, "ghost").toPath(), bogusSha + "\n");
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef("ghost")
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    detector::detectChangedFiles);
+
+            String message = error.getMessage();
+            assertTrue(message.contains("shallow clone"),
+                    "Expected shallow-clone hint in error message, got: " + message);
+            assertTrue(message.contains("fetch-depth: 0") && message.contains("GIT_DEPTH: 0"),
+                    "Expected both GitHub and GitLab fix hints, got: " + message);
+            assertTrue(error.getCause() instanceof org.eclipse.jgit.errors.MissingObjectException,
+                    "Expected cause to be MissingObjectException, got: " + error.getCause());
+        }
+    }
+
+    @Test
     void failsLoudlyOnNonGitDirectory() {
         Path nonGitDir = tempDir.resolve("not-a-repo");
         nonGitDir.toFile().mkdirs();
