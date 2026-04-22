@@ -164,6 +164,25 @@ public final class PathToClassMapper {
                 continue;
             }
 
+            // module-info.java (JPMS descriptor) and package-info.java
+            // (package-level annotations / docs) are not production
+            // classes: they have no instantiable type and no FQN that
+            // tests can reference, so tryMapToClass would either
+            // produce a non-FQN ("module-info") or a dotted form like
+            // "com.example.package-info" that poisons every downstream
+            // strategy that treats it as a class name. Both shapes are
+            // genuine changes the operator cares about — a package
+            // annotation can affect every test in the package, and a
+            // module-info change alters JPMS visibility — so route
+            // them to the unmapped bucket and let the UNMAPPED_FILE
+            // safety net decide (FULL_SUITE in CI mode by default).
+            String fileName = extractFileName(filePath);
+            if ("module-info.java".equals(fileName) || "package-info.java".equals(fileName)) {
+                log.debug("Java marker file ({}) flagged as unmapped: {}", fileName, filePath);
+                unmappedChangedFiles.add(filePath);
+                continue;
+            }
+
             String testFqn = tryMapToClass(filePath, config.testDirs());
             if (testFqn != null) {
                 testClasses.add(testFqn);
@@ -236,6 +255,12 @@ public final class PathToClassMapper {
             return relativePath.replace('/', '.');
         }
         return null;
+    }
+
+    private static String extractFileName(String filePath) {
+        String normalized = filePath.replace('\\', '/');
+        int idx = normalized.lastIndexOf('/');
+        return idx < 0 ? normalized : normalized.substring(idx + 1);
     }
 
     private static boolean hasTraversalSegment(String filePath) {

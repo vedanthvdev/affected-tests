@@ -1,7 +1,6 @@
 package io.affectedtests.core.discovery;
 
 import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import io.affectedtests.core.mapping.OutOfScopeMatchers;
@@ -32,7 +31,7 @@ public final class ProjectIndex {
 
     // Lazy AST cache. null entries mean "parsed but invalid/empty".
     private final Map<Path, CompilationUnit> cuCache = new HashMap<>();
-    private final JavaParser parser = new JavaParser();
+    private final JavaParser parser = JavaParsers.newParser();
 
     private ProjectIndex(List<Path> sourceFiles, List<Path> testFiles,
                          Map<String, Path> testFqnToPath, Set<String> sourceFqns) {
@@ -155,17 +154,7 @@ public final class ProjectIndex {
         if (cuCache.containsKey(file)) {
             return cuCache.get(file);
         }
-        CompilationUnit cu = null;
-        try {
-            ParseResult<CompilationUnit> result = parser.parse(file);
-            if (result.isSuccessful() && result.getResult().isPresent()) {
-                cu = result.getResult().get();
-            } else {
-                log.debug("Failed to parse {}", file);
-            }
-        } catch (Exception e) {
-            log.debug("Error parsing {}: {}", file, e.getMessage());
-        }
+        CompilationUnit cu = JavaParsers.parseOrWarn(parser, file, "index");
         cuCache.put(file, cu);
         return cu;
     }

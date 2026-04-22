@@ -389,6 +389,53 @@ class PathToClassMapperTest {
     }
 
     @Test
+    void moduleInfoRoutesToUnmappedNotProduction() {
+        // Regression: `module-info.java` is the JPMS descriptor, not a
+        // production type. The old path handed it to tryMapToClass,
+        // which produced the non-FQN "module-info" and classified it
+        // as a production class — poisoning every downstream strategy
+        // (naming/usage/impl all try to derive a simple class name
+        // from the FQN and match `module-info` against real source
+        // classes, which never matches and silently skips all the
+        // tests that the module-descriptor change could actually
+        // affect). Routing it to unmapped hands control to the
+        // UNMAPPED_FILE safety net, which defaults to FULL_SUITE in
+        // CI mode — the correct conservative choice because a
+        // module-info change alters visibility for every consumer.
+        Set<String> changed = Set.of("src/main/java/module-info.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().isEmpty(),
+                "module-info must never become a production FQN");
+        assertTrue(result.unmappedChangedFiles().contains("src/main/java/module-info.java"),
+                "module-info must land in the unmapped bucket so the safety "
+                        + "net can escalate, got: " + result.unmappedChangedFiles());
+    }
+
+    @Test
+    void packageInfoRoutesToUnmappedNotProduction() {
+        // Same failure mode as module-info: `package-info.java` is a
+        // marker file that carries package-level annotations/docs, not
+        // a production type. Pre-fix it became the FQN
+        // `com.example.package-info`, which is syntactically illegal
+        // as a Java identifier but which tryMapToClass happily
+        // produced. Every strategy then silently failed to resolve
+        // the dotted form to a real class. A change to
+        // package-info.java can legitimately affect every test in
+        // that package (e.g. adding a package-wide `@Nullable`
+        // default), so the UNMAPPED_FILE escalation is the correct
+        // conservative routing.
+        Set<String> changed = Set.of("src/main/java/com/example/package-info.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().isEmpty(),
+                "package-info must never become a production FQN");
+        assertTrue(result.unmappedChangedFiles()
+                        .contains("src/main/java/com/example/package-info.java"),
+                "package-info must land in the unmapped bucket");
+    }
+
+    @Test
     void allowsLegitimateFilenamesThatContainDotDotSubstring() {
         // Negative: a file literally named `foo..bar.java` is legal on
         // POSIX and must not be mistaken for traversal. The guard is

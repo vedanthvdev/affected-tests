@@ -1,13 +1,9 @@
 package io.affectedtests.core.discovery;
 
 import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
-import com.github.javaparser.ast.body.FieldDeclaration;
-import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.body.Parameter;
-import com.github.javaparser.ast.body.VariableDeclarator;
+import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -129,7 +125,7 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                                                                ProjectIndex index,
                                                                Set<String> extraKnownFqns) {
         Map<String, Set<String>> reverseMap = new HashMap<>();
-        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
+        JavaParser fallbackParser = (index == null) ? JavaParsers.newParser() : null;
 
         // First pass: collect all known FQNs so we can resolve simple names.
         // `extraKnownFqns` is unioned in so reverse edges to deleted classes
@@ -169,18 +165,31 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
                     .map(pd -> pd.getNameAsString())
                     .orElse("");
 
+            // Walk every ClassOrInterfaceType node in the compilation unit.
+            // This is deliberately broader than the old "fields + method
+            // signatures" scan it replaces:
+            //
+            //  * Generics: `List<Foo>` parses as ClassOrInterfaceType(List)
+            //    with a type-argument ClassOrInterfaceType(Foo). The old
+            //    code normalised the outer type name and threw the
+            //    argument away — any consumer that wrapped the changed
+            //    class in a container lost its reverse edge.
+            //  * Method bodies: local declarations (`PricingCalculator c
+            //    = new PricingCalculator()`), ObjectCreationExpr
+            //    (`new Foo()`), cast expressions, and `instanceof` checks
+            //    all show up as ClassOrInterfaceType nodes inside the
+            //    body subtree. The old code only looked at field types
+            //    and method signatures, so a helper class instantiated
+            //    inside a method body had no reverse edge and its
+            //    consumer's tests were silently dropped on changes.
+            //  * extends/implements: also surface as ClassOrInterfaceType,
+            //    giving us a correct supertype-aware reverse edge for
+            //    free.
             Set<String> referencedTypes = new LinkedHashSet<>();
-
-            for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
-                for (VariableDeclarator var : field.getVariables()) {
-                    referencedTypes.add(normalizeTypeName(var.getTypeAsString()));
-                }
-            }
-
-            for (MethodDeclaration method : cu.findAll(MethodDeclaration.class)) {
-                referencedTypes.add(normalizeTypeName(method.getTypeAsString()));
-                for (Parameter param : method.getParameters()) {
-                    referencedTypes.add(normalizeTypeName(param.getTypeAsString()));
+            for (ClassOrInterfaceType t : cu.findAll(ClassOrInterfaceType.class)) {
+                String simpleName = t.getNameAsString();
+                if (!simpleName.isEmpty()) {
+                    referencedTypes.add(simpleName);
                 }
             }
 
@@ -219,28 +228,7 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         if (index != null) {
             return index.compilationUnit(file);
         }
-        try {
-            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
-            if (result.isSuccessful() && result.getResult().isPresent()) {
-                return result.getResult().get();
-            }
-        } catch (Exception e) {
-            log.debug("Error parsing {} for dependency map: {}", file, e.getMessage());
-        }
-        return null;
-    }
-
-    /**
-     * Strips generic parameters and array brackets from a type name so
-     * {@code List<Foo>} and {@code Foo[]} both normalise to {@code Foo}.
-     */
-    static String normalizeTypeName(String typeName) {
-        int idx = typeName.indexOf('<');
-        String base = idx >= 0 ? typeName.substring(0, idx) : typeName;
-        while (base.endsWith("[]")) {
-            base = base.substring(0, base.length() - 2);
-        }
-        return base.trim();
+        return JavaParsers.parseOrWarn(fallbackParser, file, "transitive");
     }
 
     private String pathToFqn(Path file) {

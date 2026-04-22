@@ -363,6 +363,109 @@ class UsageStrategyTest {
     }
 
     @Test
+    void findsTestThatUsesChangedClassByFullyQualifiedInlineReference() throws IOException {
+        // Regression: a test that never imports the changed class but
+        // refers to it inline by its full dotted name
+        //   com.example.service.Thing t = new com.example.service.Thing();
+        // slid through every tier pre-fix (no matching import, no
+        // wildcard, different package, and the simple-name AST scan
+        // would only fire if the test lived in the same package). The
+        // new Tier 3 walks ClassOrInterfaceType nodes and reads
+        // getNameWithScope() so the inline fully-qualified shape is
+        // caught deterministically, without depending on raw source
+        // text or on comment stripping.
+        Path testDir = tempDir.resolve("src/test/java/com/example/other");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("FullyQualifiedInlineTest.java"), """
+                package com.example.other;
+
+                public class FullyQualifiedInlineTest {
+                    public void t() {
+                        com.example.service.Thing x =
+                                new com.example.service.Thing();
+                    }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.service.Thing"), tempDir);
+
+        assertTrue(result.contains("com.example.other.FullyQualifiedInlineTest"),
+                "Tests that inline-qualify the changed class must still be "
+                        + "selected — otherwise any test in a sibling package "
+                        + "that avoids imports (common in Cucumber-style steps) "
+                        + "silently drops coverage");
+    }
+
+    @Test
+    void findsTestThatInnerClassQualifiesThroughChangedOuter() throws IOException {
+        // Follow-up to findsTestThatImportsInnerClassOfChangedOuter:
+        // same semantic (Outer.java change surfaces only the outer
+        // FQN, but the test actually uses Outer.Inner) but expressed
+        // inline rather than via an import. The Tier 3 startsWith
+        // check must treat `com.example.Outer.Inner` as a dependency
+        // of `com.example.Outer` so a test that never imports Outer
+        // still gets selected.
+        Path testDir = tempDir.resolve("src/test/java/com/example/other");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("InlineInnerTest.java"), """
+                package com.example.other;
+
+                public class InlineInnerTest {
+                    public void t() {
+                        com.example.Outer.Inner x = new com.example.Outer.Inner();
+                    }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Outer"), tempDir);
+
+        assertTrue(result.contains("com.example.other.InlineInnerTest"),
+                "Inline reference to an inner class of the changed outer must "
+                        + "still pull the test in — the inner is part of the "
+                        + "outer's file and shares its change signature");
+    }
+
+    @Test
+    void findsTestThatWildcardsClassMembersOfChangedClass() throws IOException {
+        // Regression: `import com.example.Outer.*;` imports every
+        // member of Outer — nested types, public static fields,
+        // nested classes. PathToClassMapper reports changes at the
+        // outer-FQN granularity, so when Outer.java changes the
+        // strategy sees `changedFqns = { "com.example.Outer" }`. The
+        // old wildcard tier bucketed "com.example.Outer" as a package
+        // wildcard and then checked whether the AST referenced the
+        // simple name "Outer" — which test code using the wildcard
+        // almost never writes (the whole point of the wildcard is to
+        // skip qualification). Result: the consumer's tests were
+        // silently dropped on every change to Outer.java. The new
+        // class-member wildcard tier returns true as soon as the
+        // wildcard target equals a changed FQN.
+        Path testDir = tempDir.resolve("src/test/java/com/example/consumers");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("WildcardMemberTest.java"), """
+                package com.example.consumers;
+
+                import com.example.Outer.*;
+
+                public class WildcardMemberTest {
+                    public void t() {
+                        Inner i = new Inner();
+                    }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Outer"), tempDir);
+
+        assertTrue(result.contains("com.example.consumers.WildcardMemberTest"),
+                "`import pkg.Outer.*` must be treated as a dependency on "
+                        + "pkg.Outer — every member the wildcard brings in lives "
+                        + "inside Outer.java and shares its change signature");
+    }
+
+    @Test
     void findsTestThatUsesStaticWildcardImportFromChangedClass() throws IOException {
         // Same as above but with the wildcard static form:
         // `import static com.example.Constants.*;`. Pre-fix this was

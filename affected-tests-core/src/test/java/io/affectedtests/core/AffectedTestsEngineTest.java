@@ -447,6 +447,57 @@ class AffectedTestsEngineTest {
     }
 
     @Test
+    void mixedIgnoredAndOutOfScopeDiffRoutesToAllFilesOutOfScope() throws Exception {
+        // Regression for batch-4 finding: an MR that combined a
+        // markdown change (ignored by default globs) with an api-test
+        // change (out-of-scope under the pilot config) previously
+        // landed nowhere. Neither bucket alone matched the whole
+        // diff, so the engine dropped through to mapping → empty
+        // production/test sets → DISCOVERY_EMPTY, which in CI mode
+        // defaults to FULL_SUITE. That is exactly the "quietly escalate
+        // a no-op MR into a full CI run" shape v2 was built to prevent.
+        // The fix: when ignored + out-of-scope together cover the
+        // whole diff, route straight to ALL_FILES_OUT_OF_SCOPE (skip)
+        // just as either bucket would individually.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            // One ignored file (markdown) + one out-of-scope file
+            // (api-test). Neither bucket on its own matches the diff
+            // — only the union does.
+            Files.writeString(tempDir.resolve("docs.md"), "# docs");
+
+            Path apiTestDir = tempDir.resolve("api-test/src/test/java/com/example/api");
+            Files.createDirectories(apiTestDir);
+            Files.writeString(apiTestDir.resolve("FooSteps.java"),
+                    "package com.example.api;\npublic class FooSteps {}");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("mixed ignored+out-of-scope").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .outOfScopeTestDirs(java.util.List.of("api-test/src/test/java"))
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.ALL_FILES_OUT_OF_SCOPE, result.situation(),
+                    "Mixed ignored+out-of-scope must route to ALL_FILES_OUT_OF_SCOPE, "
+                            + "not fall through to DISCOVERY_EMPTY");
+            assertEquals(Action.SKIPPED, result.action(),
+                    "Mixed ignored+out-of-scope must default to SKIPPED — otherwise "
+                            + "markdown+api-test MRs silently kick off full CI runs");
+            assertTrue(result.skipped());
+            assertFalse(result.runAll());
+            assertTrue(result.testClassFqns().isEmpty());
+        }
+    }
+
+    @Test
     void modeCiEscalatesDiscoveryEmpty() throws Exception {
         // Mode.CI's DISCOVERY_EMPTY default is FULL_SUITE — a CI user who
         // opts into mode=CI without also setting the legacy boolean still

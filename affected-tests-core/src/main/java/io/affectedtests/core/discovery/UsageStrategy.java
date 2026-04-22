@@ -1,7 +1,6 @@
 package io.affectedtests.core.discovery;
 
 import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.ImportDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
@@ -80,7 +79,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             simpleNames.add(simpleName);
         }
 
-        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
+        JavaParser fallbackParser = (index == null) ? JavaParsers.newParser() : null;
 
         for (Path testFile : testFiles) {
             CompilationUnit cu = parseOrGet(testFile, index, fallbackParser);
@@ -106,15 +105,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         if (index != null) {
             return index.compilationUnit(file);
         }
-        try {
-            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
-            if (result.isSuccessful() && result.getResult().isPresent()) {
-                return result.getResult().get();
-            }
-        } catch (Exception e) {
-            log.debug("Error parsing {}: {}", file, e.getMessage());
-        }
-        return null;
+        return JavaParsers.parseOrWarn(fallbackParser, file, "usage");
     }
 
     /**
@@ -173,13 +164,35 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // Tier 1b: Wildcard import match
+        // Tier 1b: Wildcard import match. Two shapes have to be handled:
+        //
+        //   * `import com.example.service.*;`      — a package wildcard;
+        //     the test may reference any simple type inside that
+        //     package. We gate on the simple name actually appearing in
+        //     the AST so we don't over-select.
+        //
+        //   * `import com.example.Outer.*;`        — a class-member
+        //     wildcard. Every member of `Outer` (including its nested
+        //     types and public static members) is visible in the test
+        //     without further qualification, so a change to
+        //     `Outer.java` — which PathToClassMapper reports as a
+        //     change to `com.example.Outer` — must pull the test in
+        //     unconditionally; the test doesn't have to mention
+        //     `Outer` by name at all. Pre-fix this case was bucketed
+        //     as a package wildcard (`wildcardPackages` held
+        //     "com.example.Outer") and the subsequent
+        //     `typeNameAppearsInAst("Outer")` check almost always
+        //     failed, silently dropping the consumer's coverage.
         for (String changedFqn : changedFqns) {
+            if (wildcardPackages.contains(changedFqn)) {
+                log.debug("  Wildcard class-member import match: {}", changedFqn);
+                return true;
+            }
             String pkg = SourceFileScanner.packageOf(changedFqn);
             if (wildcardPackages.contains(pkg)) {
                 String simpleName = SourceFileScanner.simpleClassName(changedFqn);
                 if (typeNameAppearsInAst(cu, simpleName)) {
-                    log.debug("  Wildcard import + type ref match: {}", changedFqn);
+                    log.debug("  Wildcard package import + type ref match: {}", changedFqn);
                     return true;
                 }
             }
@@ -200,7 +213,48 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             }
         }
 
+        // Tier 3: Fully-qualified inline references that never went
+        // through an import. Catches
+        //   `com.example.other.Thing t = new com.example.other.Thing();`
+        //   `(com.example.other.Thing) x`
+        //   `com.example.other.Thing.Inner nested = ...;`
+        // i.e. anything where the test author typed the full dotted
+        // name of the changed class at a use site. Walks every
+        // {@link ClassOrInterfaceType} node and reads its
+        // {@code getNameWithScope()} (which reconstitutes the dotted
+        // chain from the parent scope references), so we don't depend
+        // on raw source text or comments. The bare-name case is
+        // already handled by Tier 1 / 1b / 2; skip dotless hits here
+        // to avoid double-counting.
+        for (ClassOrInterfaceType type : cu.findAll(ClassOrInterfaceType.class)) {
+            String scoped = nameWithScopeOrNull(type);
+            if (scoped == null || !scoped.contains(".")) continue;
+            for (String changedFqn : changedFqns) {
+                if (scoped.equals(changedFqn) || scoped.startsWith(changedFqn + ".")) {
+                    log.debug("  Inline fully-qualified reference: {} -> {}", scoped, changedFqn);
+                    return true;
+                }
+            }
+        }
+
         return false;
+    }
+
+    /**
+     * Returns the dotted name of {@code type} including its enclosing
+     * scope chain, or {@code null} when JavaParser throws while
+     * reconstructing it (e.g. a partially-resolved type node in an
+     * invalid source file). Isolating the guard here means the caller
+     * never has to defensively wrap the AST walk — a best-effort null
+     * is enough to skip a single type node while the rest of the file
+     * still contributes to discovery.
+     */
+    private static String nameWithScopeOrNull(ClassOrInterfaceType type) {
+        try {
+            return type.getNameWithScope();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /**

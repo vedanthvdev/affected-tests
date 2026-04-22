@@ -6,6 +6,135 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — post-v1.9.19 multi-reviewer correctness pass (v1.9.20)
+
+A second, deeper multi-agent review of the post-v1.9.19 tree surfaced a
+cluster of tier-1 silent-drop bugs that all shared the same failure
+mode: the strategy *thought* it had walked a construct but had actually
+missed one of its real-world shapes, so the consumer test for a changed
+class never entered the selected set. Every fix below ships with a
+regression test that fails when the fix is reverted.
+
+- **JavaParser no longer silently drops every file using Java 14+
+  language features.** `new JavaParser()` defaults to
+  `LanguageLevel.JAVA_11` in JavaParser 3.28, which means every
+  compilation unit containing a record, sealed type, or pattern-matching
+  shape produced `ParseResult.isSuccessful() == false`. The four call
+  sites (`ProjectIndex`, `TransitiveStrategy`, `ImplementationStrategy`,
+  `UsageStrategy`) then discarded the result and the file contributed
+  nothing to reverse-dependency, implementation, or usage discovery.
+  Any modern Spring/DDD codebase leaning on value-object records would
+  silently drop every consumer test that depended on a record-shaped
+  production class. All four sites now route through a new
+  `JavaParsers.newParser()` factory that sets the level to `JAVA_25`
+  (the highest stable, non-preview level bundled with JavaParser 3.28,
+  which closes the same failure mode for adopters shipping Java
+  22–25-era syntax). `JavaParsers.parseOrWarn` also replaces the four
+  independent `parseOrGet` helpers so parse failures now log at `WARN`
+  with the first JavaParser diagnostic — previously the `isSuccessful
+  == false` branch logged at `DEBUG`, which is the exact invisibility
+  that hid this bug class for the last eight releases. Regression
+  lives in `ImplementationStrategyTest`
+  (`findsRecordImplementationOfChangedInterface`,
+  `findsEnumImplementationOfChangedInterface`).
+- **`TransitiveStrategy` now preserves generic type arguments when
+  building the reverse-dependency graph.** The old pipeline parsed
+  field and method-signature types as plain strings, normalised
+  `List<FooService>` down to `List`, looked the base name up against
+  the known FQN set (stdlib import, not a project class), and dropped
+  the edge. Every consumer that wrapped the changed type in a
+  collection, `Optional`, `Flux`, or any other container lost its
+  reverse edge — and with it, all of its tests. The new scan walks
+  every `ClassOrInterfaceType` node in the AST, so the inner `FooService`
+  of `List<FooService>` is a first-class reference. Regression:
+  `TransitiveStrategyTest#preservesGenericArgumentsInReverseDependencyEdges`.
+- **`TransitiveStrategy` now scans method bodies, not just signatures.**
+  The same string-based approach skipped everything inside method
+  bodies. A helper referenced only through `new PricingCalculator()`,
+  a cast, or an `instanceof` had no reverse edge and its test was
+  silently dropped whenever the helper changed — the single most
+  common refactor shape on a service layer. Switching to
+  `findAll(ClassOrInterfaceType.class)` covers field types, signatures,
+  local variables, instantiations, casts, and pattern checks in one
+  pass. Regression:
+  `TransitiveStrategyTest#discoversEdgesFromMethodBodyReferences`.
+- **`ImplementationStrategy` now recognises records and enums as
+  implementers.** The AST pass only iterated
+  `ClassOrInterfaceDeclaration`, so
+  `record UsdMoney(long cents) implements Money` and
+  `enum Currency implements HasCode` were invisible to the supertype
+  walk. Naming-convention matching does not rescue records (records
+  are named after the value they hold, not after the interface they
+  implement), so a change to the interface silently dropped the
+  record's test. The pass now finds every `TypeDeclaration` subtype
+  and the new `supertypesOf` helper extracts the correct
+  extends/implements list for classes, records, and enums. An explicit
+  `AnnotationDeclaration` branch and a defensive `WARN`-logged default
+  branch close the door on the same bug class silently reappearing
+  when JavaParser introduces a future declaration kind. Regressions
+  live in `ImplementationStrategyTest` (the same two tests above).
+- **`GitChangeDetector` now diffs against the merge-base, not the tip
+  of `baseRef`.** The old `committedChanges` path diffed HEAD directly
+  against `baseId`. If master moved on after the branch diverged —
+  which on any busy repo means "always" — every post-divergence
+  master-only commit showed up as a "change" on the feature branch,
+  inflating the affected-tests set toward "everything" and destroying
+  the whole point of selective testing. The new path computes the
+  merge-base via `RevFilter.MERGE_BASE` and diffs against that; on the
+  pathological case of no common ancestor it falls back to the
+  `baseId` tip so the previous behaviour remains available and now
+  surfaces as a `WARN` (was `DEBUG`) so operators can see the semantic
+  reversion on grafted or subtree-merged histories. Regression:
+  `GitChangeDetectorTest#diffsAgainstMergeBaseNotBaseRefTip`.
+- **`UsageStrategy` now catches fully-qualified inline references.** A
+  test that skipped the import and wrote
+  `com.example.service.Thing t = new com.example.service.Thing();`
+  slid through every tier of the old matcher — no import, no
+  wildcard, different package, and the simple-name AST scan would
+  only fire if the test lived in the same package. A new "Tier 3"
+  walks every `ClassOrInterfaceType`, reads
+  `getNameWithScope()` via a `nameWithScopeOrNull` helper, and matches
+  the reconstituted dotted name against the changed-FQN set. The
+  same tier also catches inline references to inner classes of a
+  changed outer. Regressions:
+  `UsageStrategyTest#findsTestThatUsesChangedClassByFullyQualifiedInlineReference`,
+  `UsageStrategyTest#findsTestThatInnerClassQualifiesThroughChangedOuter`.
+- **`UsageStrategy` now treats `import pkg.Outer.*` as a dependency on
+  `pkg.Outer`.** The old wildcard tier bucketed `pkg.Outer` as a
+  package wildcard (since it ended in `.*`) and then checked whether
+  the AST referenced the bare name `Outer` — which test code using the
+  wildcard almost never writes, because the whole point of the
+  wildcard is to skip qualification. Any `Outer.java` change that
+  shipped without touching its own imports therefore silently dropped
+  every consumer relying on the class-member wildcard. The matcher
+  now recognises class-member wildcards by direct FQN equality against
+  the changed set. Regression:
+  `UsageStrategyTest#findsTestThatWildcardsClassMembersOfChangedClass`.
+- **`module-info.java` and `package-info.java` now route to the
+  unmapped bucket.** The old mapper produced `module-info` /
+  `com.example.package-info` as "production FQNs", poisoning every
+  downstream strategy (they would try to derive a simple class name
+  from the FQN and match it against real source classes, which never
+  matched and silently skipped all the tests the descriptor change
+  could actually affect). Both marker files carry project-wide
+  semantics — JPMS visibility, package annotations — so the correct
+  conservative routing is to hand them to the `UNMAPPED_FILE` safety
+  net, which in CI mode escalates to a full suite. Regressions:
+  `PathToClassMapperTest#moduleInfoRoutesToUnmappedNotProduction`,
+  `PathToClassMapperTest#packageInfoRoutesToUnmappedNotProduction`.
+- **Mixed ignored + out-of-scope diffs now route to
+  `ALL_FILES_OUT_OF_SCOPE` instead of falling through to
+  `DISCOVERY_EMPTY`.** An MR that combined a markdown tweak (ignored
+  by default globs) with an `api-test/` change (out-of-scope under the
+  pilot config) previously landed nowhere. Neither bucket alone
+  matched the whole diff, so the engine dropped through to mapping,
+  produced empty production/test sets, and hit `DISCOVERY_EMPTY` —
+  which under CI mode defaults to `FULL_SUITE`. That is exactly the
+  "quietly escalate a no-op MR into a full CI run" shape v2 was built
+  to prevent. The engine now explicitly routes the union case to
+  `ALL_FILES_OUT_OF_SCOPE`, which defaults to `SKIPPED`. Regression:
+  `AffectedTestsEngineTest#mixedIgnoredAndOutOfScopeDiffRoutesToAllFilesOutOfScope`.
+
 ### Fixed — post-v1.9.18 code-review pass
 
 A four-reviewer sweep (correctness, security, maintainability, simplicity)

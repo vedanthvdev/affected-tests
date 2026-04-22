@@ -132,6 +132,85 @@ class TransitiveStrategyTest {
     }
 
     @Test
+    void preservesGenericArgumentsInReverseDependencyEdges() throws IOException {
+        // Regression: the old normalize-then-match pipeline stripped
+        // `List<FooService>` down to `List`, looked up `List` against
+        // the known FQN set (stdlib import, not a project class), and
+        // threw the edge away. Any consumer that wrapped the changed
+        // type in a container, Optional, Flux, Map<K,V>, or any other
+        // generic lost its reverse-dependency edge — and with it, all
+        // of its tests. Collection-of-service is the single most
+        // common shape in Spring service layers, so this silently
+        // dropped a very large fraction of downstream coverage.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("FooService.java"),
+                "package com.example;\npublic class FooService {}");
+        Files.writeString(prodDir.resolve("BarService.java"), """
+                package com.example;
+
+                import java.util.List;
+
+                public class BarService {
+                    private List<FooService> fooServices;
+                }
+                """);
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("BarServiceTest.java"),
+                "package com.example;\npublic class BarServiceTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.FooService"), tempDir);
+
+        assertTrue(result.contains("com.example.BarServiceTest"),
+                "Must treat `List<FooService>` as a reverse edge to FooService — "
+                        + "stripping generics silently drops every `List<Foo>` "
+                        + "consumer's tests");
+    }
+
+    @Test
+    void discoversEdgesFromMethodBodyReferences() throws IOException {
+        // Regression: the old scan looked at field types and method
+        // signatures only. A helper class referenced solely inside a
+        // method body — `new PricingCalculator()`, `(PricingCalculator)
+        // svc`, `svc instanceof PricingCalculator` — had no reverse
+        // edge, so its tests were silently dropped whenever the
+        // helper changed. This fixture models the simplest such
+        // shape: OrderService instantiates a changed PricingCalculator
+        // inside a method, and OrderServiceTest is the only test that
+        // exercises that path. Pre-fix, OrderServiceTest was invisible
+        // to the transitive walk.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("PricingCalculator.java"),
+                "package com.example;\npublic class PricingCalculator {}");
+        Files.writeString(prodDir.resolve("OrderService.java"), """
+                package com.example;
+
+                public class OrderService {
+                    public void charge() {
+                        PricingCalculator calc = new PricingCalculator();
+                    }
+                }
+                """);
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("OrderServiceTest.java"),
+                "package com.example;\npublic class OrderServiceTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.PricingCalculator"), tempDir);
+
+        assertTrue(result.contains("com.example.OrderServiceTest"),
+                "Must discover the consumer's test when the changed class is "
+                        + "only referenced inside a method body — otherwise the "
+                        + "most common helper-refactor MR silently drops coverage");
+    }
+
+    @Test
     void discoversConsumerTestsForDeletedProductionClass() throws IOException {
         // The fixture mirrors a `git rm FooService.java` MR: FooService is in
         // the changed set (surfaced by GitChangeDetector via the old path)
