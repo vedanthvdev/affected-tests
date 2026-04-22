@@ -18,7 +18,7 @@ import java.util.function.Predicate;
  * indexed files on disk) evaluate the same shape of entry with the
  * same semantics. Before this extraction the two sides disagreed on
  * glob-form entries: the mapper honoured
- * {@code outOfScopeTestDirs = ["api-test/&#42;&#42;"]} while the index
+ * {@code outOfScopeTestDirs = ["api-test/**"]} while the index
  * treated the same string as a literal prefix, so a mixed diff (one
  * production file + a refactor under {@code api-test/}) would bucket
  * the api-test file correctly but still dispatch its test because the
@@ -28,12 +28,14 @@ import java.util.function.Predicate;
  *
  * <p>Each raw entry is classified into one of two semantics based on
  * whether it contains any glob metacharacter ({@code *}, {@code ?},
- * {@code [}, <code>&#123;</code>):
+ * {@code [}, or the opening brace — which has to be written here as
+ * {@code &#123;} because Javadoc would otherwise close the
+ * {@code @code} tag at the very character we are trying to document):
  *
  * <ul>
- *   <li>Glob entries (e.g. {@code "api-test/&#42;&#42;"}) compile to
- *       a {@link PathMatcher} using the JVM's default file system
- *       {@code glob:} syntax, so {@code &#42;&#42;} crosses directory
+ *   <li>Glob entries (e.g. {@code "api-test/**"}) compile to a
+ *       {@link PathMatcher} using the JVM's default file system
+ *       {@code glob:} syntax, so {@code **} crosses directory
  *       boundaries as users expect from Ant/Gradle conventions.</li>
  *   <li>Literal entries (e.g. {@code "api-test/src/test/java"}) keep
  *       the boundary-aware prefix semantics the README has documented
@@ -126,6 +128,18 @@ public final class OutOfScopeMatchers {
         return false;
     }
 
+    /**
+     * Returns {@code true} iff the entry contains at least one glob
+     * metacharacter. Only the opening forms {@code [} and {@code {}
+     * are checked because balanced closers can't appear in a string
+     * that didn't already open one — and a user typing a literal
+     * directory name is overwhelmingly more likely to write an
+     * unmatched {@code ]} or {@code &#125;} inside a filename than
+     * they are to mean "glob". Promoting unbalanced closers to glob
+     * compilation would only convert "typo-in-literal" into a
+     * build-breaking glob syntax error. {@code *} and {@code ?} have
+     * no balanced counterpart, so they are unconditional giveaways.
+     */
     private static boolean hasGlobMetachar(String s) {
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

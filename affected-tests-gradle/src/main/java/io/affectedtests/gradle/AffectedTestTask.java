@@ -142,7 +142,13 @@ public abstract class AffectedTestTask extends DefaultTask {
     /**
      * How many levels of transitive dependencies to follow when the
      * {@code transitive} strategy is enabled.
-     * Range: 0 (disabled) to 5. Default: {@code 2}.
+     * Range: 0 (disabled) to 5. Default: {@code 4} — matches the depth
+     * most Java controller &rarr; service &rarr; repository chains
+     * actually reach in Modulr-shaped codebases while leaving one level
+     * of margin. The pre-v2 default was {@code 2}, which under-reached
+     * on any MR that crossed more than one seam; consumers reading this
+     * Javadoc were being told they still needed to set {@code 4}
+     * explicitly — they do not.
      *
      * @return the transitive depth property
      */
@@ -641,6 +647,20 @@ public abstract class AffectedTestTask extends DefaultTask {
      * Anything outside this shape cannot correspond to a real test
      * class and is dropped with a warning before reaching the nested
      * Gradle invocation.
+     *
+     * <p>Deliberately does NOT reject Java reserved words
+     * ({@code if}, {@code class}, {@code return}, ...). The contract
+     * of this filter is "is this argv safe to hand to
+     * {@code gradle --tests}" — a compromised source tree sneaking
+     * shell-like tokens or argv-flag-shaped strings into the FQN list
+     * is the threat model. An FQN that happens to look like a reserved
+     * word could never be produced by the discovery strategies (which
+     * derive names from real {@code .java} filenames), so the only way
+     * one reaches this method is adversarially, and the downstream
+     * Gradle {@code --tests} matcher will simply report
+     * "no tests found" for it — never a compile failure or RCE.
+     * Keeping the regex broad here means we don't have to ship a
+     * stale list of keywords that drifts as the JLS grows.
      */
     private static final Pattern JAVA_FQN =
             Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*");

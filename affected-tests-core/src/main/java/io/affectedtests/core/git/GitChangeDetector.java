@@ -140,55 +140,47 @@ public final class GitChangeDetector {
                 .setNewTree(headTree)
                 .call();
 
-        for (DiffEntry entry : diffs) {
-            switch (entry.getChangeType()) {
-                case ADD, COPY, MODIFY -> files.add(entry.getNewPath());
-                case DELETE -> {
-                    // Before we surfaced DELETEs, a pure 'git rm' MR routed
-                    // through EMPTY_DIFF and — in LOCAL/CI modes — silently
-                    // skipped all tests. Now the old path flows through the
-                    // normal bucketing so ignore/out-of-scope rules still
-                    // apply (deleted '*.md' stays ignored, deleted
-                    // 'api-test/**' stays out-of-scope, deleted production
-                    // classes reach the transitive strategy). The engine's
-                    // existing filter at AffectedTestsEngine drops any
-                    // discovered FQN whose test file no longer exists, so
-                    // surfacing the deleted path never asks Gradle to run a
-                    // missing test.
-                    files.add(entry.getOldPath());
-                }
-                case RENAME -> files.add(entry.getNewPath());
-            }
-        }
-
+        collectPaths(diffs, files);
         return files;
     }
 
     private Set<String> uncommittedChanges(Git git) throws GitAPIException {
         Set<String> files = new LinkedHashSet<>();
-        List<DiffEntry> diffs = git.diff().call();
-        for (DiffEntry entry : diffs) {
-            // Only include new paths (i.e. the file as it exists on disk now).
-            // Skipping old paths prevents us from trying to run tests for files
-            // that the developer has deleted locally.
-            String newPath = entry.getNewPath();
-            if (newPath != null && !newPath.equals("/dev/null")) {
-                files.add(newPath);
-            }
-        }
+        collectPaths(git.diff().call(), files);
         return files;
     }
 
     private Set<String> stagedChanges(Git git) throws GitAPIException {
         Set<String> files = new LinkedHashSet<>();
-        List<DiffEntry> diffs = git.diff().setCached(true).call();
+        collectPaths(git.diff().setCached(true).call(), files);
+        return files;
+    }
+
+    /**
+     * Shared diff-entry bucketing for the three diff sources (committed,
+     * uncommitted, staged). Keeping one implementation is the whole
+     * point of this helper: before it existed, the committed branch
+     * routed DELETEs through {@link DiffEntry#getOldPath()} so pure
+     * {@code git rm} MRs reached the bucketing pipeline, while the
+     * uncommitted and staged branches kept the older "skip anything
+     * whose newPath is /dev/null" shape. That asymmetry was inert
+     * under the v1.9.15 defaults ({@code includeUncommitted = false},
+     * {@code includeStaged = false}), but any adopter who flipped
+     * either knob back on to iterate on a local deletion hit exactly
+     * the silent-skip hole the committed branch was patched to close.
+     *
+     * <p>Surfacing the old path never asks Gradle to run a missing
+     * test — the engine's existing missing-file filter at
+     * {@code AffectedTestsEngine} drops any discovered FQN whose
+     * backing file is gone.
+     */
+    private static void collectPaths(List<DiffEntry> diffs, Set<String> files) {
         for (DiffEntry entry : diffs) {
-            String newPath = entry.getNewPath();
-            if (newPath != null && !newPath.equals("/dev/null")) {
-                files.add(newPath);
+            switch (entry.getChangeType()) {
+                case ADD, COPY, MODIFY, RENAME -> files.add(entry.getNewPath());
+                case DELETE -> files.add(entry.getOldPath());
             }
         }
-        return files;
     }
 
     private ObjectId resolveBaseRef(Repository repository) throws IOException {
