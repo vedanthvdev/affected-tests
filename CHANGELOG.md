@@ -4,58 +4,69 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.10.0] — 2026-04-21
+## [Unreleased]
 
-Closes Phase 1 and Phase 2 of the [v2 config redesign](docs/DESIGN-v2.md). The
-new v2 decision vocabulary (`mode`, per-situation `onXxx`, `ignorePaths`,
-`outOfScopeTestDirs`, `outOfScopeSourceDirs`, `--explain`, and the
-`ActionSource` priority-ladder tags) landed additively across the v1.9.8 and
-v1.9.9 patch releases. This minor bump completes the story by making every
-operator-facing log line speak that same vocabulary and by warning existing
-users off the legacy knobs ahead of the v2.0.0 removal.
+Nothing yet.
+
+## [1.9.12] — 2026-04-22
+
+Metadata and release-pipeline release — no plugin behaviour change. Introduces
+this file, fixes the README's outdated guidance on forcing minor/major bumps,
+and teaches the release workflow a proper entry point for non-patch releases
+so the next minor bump can actually be requested end-to-end.
 
 ### Added
 
-- **Named outcome and situation on the summary log.** Every `affectedTest` run
-  now prints `Affected Tests: <OUTCOME> (<SITUATION>) — …`, for example
-  `Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 3 changed file(s); running
-  full suite (unmapped file changes forced full run)`. Makes CI dashboards
-  greppable and uses the exact same outcome + situation names that `--explain`
-  reports, so a dashboard line and a decision trace are readable against each
-  other.
+- `CHANGELOG.md` itself, plus a README link so it's discoverable from the
+  landing page.
+- `workflow_dispatch` trigger on `release.yml` with an optional `version`
+  input. Supplying `version: 1.10.0` runs
+  `./gradlew release -Prelease.version=1.10.0` and overrides the default patch
+  auto-increment. Manually triggered runs still go through the same
+  portal-check and GH-release steps, so they stay idempotent.
 
-### Deprecated
+### Fixed
 
-These legacy knobs keep working unchanged and produce identical test
-selections. The plugin now emits one `WARN`-level line per explicitly-set knob
-pointing at the v2 replacement. Zero-config installs see no new warnings.
+- README Versioning table previously claimed
+  `./gradlew markNextVersion -Prelease.version=X.Y.0` would force a minor bump
+  on the next release. It did not — axion-release's `markNextVersion` creates
+  a `release-X.Y.Z` marker tag that only influences the `currentVersion`
+  *display*, not the `release` task. The table now reflects the three
+  mechanisms that actually work: default patch (merge to master), explicit
+  version (Actions → Release → Run workflow), and manual local
+  (`./gradlew release -Prelease.version=X.Y.Z` with a Personal Access Token).
 
-- `runAllIfNoMatches` → per-situation actions
-  (`onEmptyDiff` / `onAllFilesIgnored` / `onAllFilesOutOfScope` /
-  `onDiscoveryEmpty`).
-- `runAllOnNonJavaChange` → `onUnmappedFile`.
-- `excludePaths` → rename to `ignorePaths` (semantics identical; leaving
-  `ignorePaths` unset picks up the broader v2 default list — markdown,
-  `generated/`, licence / changelog, common images — instead of the previous
-  markdown-only default).
+## Release history before this file existed
 
-The legacy knobs are scheduled for removal in **v2.0.0**. See the
-*"Migrating from v1 config"* section in `README.md` for the worked example,
-the before/after table, and the decision tree.
+The v2 configuration model landed additively across the preceding patch
+releases. The full per-tag auto-generated notes are on
+[GitHub Releases](https://github.com/vedanthvdev/affected-tests/releases). In
+broad strokes:
 
-### Documentation
+- **v1.9.11** — Deprecation warnings on the three legacy knobs
+  (`runAllIfNoMatches`, `runAllOnNonJavaChange`, `excludePaths`), pointing at
+  the v2 replacements. README examples flipped to v2-native.
+  See [`docs/DESIGN-v2.md`](docs/DESIGN-v2.md) for the design doc and the
+  "Migrating from v1 config" section in `README.md` for the worked example,
+  before/after table, and decision tree. The legacy knobs are scheduled for
+  removal in v2.0.0.
+- **v1.9.10** — Named outcome and situation on every `affectedTest` summary
+  log line:
+  `Affected Tests: <OUTCOME> (<SITUATION>) — <details>`. Matches the
+  vocabulary `--explain` reports.
+- **v1.9.9** — `--explain` CLI flag on `affectedTest`. Prints the full
+  decision trace — bucketed diff, resolved action per situation with the
+  priority-ladder tier that picked each
+  (`EXPLICIT` / `LEGACY_BOOLEAN` / `MODE_DEFAULT` / `HARDCODED_DEFAULT`), and
+  the final outcome — without running any tests.
+- **v1.9.8** — Core v2 configuration API: the `Action` / `Situation` / `Mode`
+  vocabulary, per-situation `onXxx` actions, `ignorePaths` (replaces
+  `excludePaths` with a broader default list), and
+  `outOfScopeTestDirs` / `outOfScopeSourceDirs` for Cucumber / API-test
+  exclusions that should skip rather than escalate to the full suite.
+- **v1.9.7 and earlier** — Plugin bring-up, Gradle Plugin Portal publishing,
+  safety hardening, multi-module scanning, axion-release versioning. See the
+  Releases page for detail.
 
-- README examples are all v2-native. The "Migrating from v1 config" section is
-  the single source of truth for operators moving off legacy knobs.
-- The `AffectedTestsExtension` javadoc sample mirrors the README canonical
-  config, so IDE autocomplete no longer steers new users toward deprecated
-  knobs.
-
-## Earlier releases
-
-The v2 configuration API and `--explain` flag landed in the v1.9.8 and v1.9.9
-patch releases. The full v1.0 – v1.9.9 history, with auto-generated release
-notes linked from every PR, is on
-[GitHub Releases](https://github.com/vedanthvdev/affected-tests/releases).
-
-[1.10.0]: https://github.com/vedanthvdev/affected-tests/releases/tag/v1.10.0
+[Unreleased]: https://github.com/vedanthvdev/affected-tests/compare/v1.9.12...HEAD
+[1.9.12]: https://github.com/vedanthvdev/affected-tests/releases/tag/v1.9.12

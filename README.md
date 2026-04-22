@@ -405,16 +405,17 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the release history. GitHub's auto-genera
 
 ## Versioning
 
-Versions are managed automatically via [axion-release](https://github.com/allegro/axion-release-plugin) — derived from git tags, never hardcoded in source.
+Versions are managed automatically via [axion-release](https://github.com/allegro/axion-release-plugin) — derived from git tags, never hardcoded in source. The release workflow (`.github/workflows/release.yml`) runs on every push to `master` and cuts a **patch** release by default. For minor or major bumps, trigger the workflow manually with a `version` input.
 
-| Goal | Command |
-|------|---------|
-| Check current version | `./gradlew currentVersion` |
-| Auto patch release | Just merge to master (CI does it) |
-| Force minor bump next | `./gradlew markNextVersion -Prelease.version=X.Y.0` |
-| Force major bump next | `./gradlew markNextVersion -Prelease.version=X.0.0` |
-| Manual release | `./gradlew release` |
-| Release as RC | `./gradlew release -Prelease.versionIncrementer=incrementPrerelease` |
+| Goal | How |
+|------|-----|
+| Check what version this branch is | `./gradlew currentVersion` |
+| Auto patch release (e.g. `1.9.12` → `1.9.13`) | Merge to `master` — the release workflow does the rest |
+| Force a minor or major release (e.g. `1.9.x` → `1.10.0`) | GitHub → Actions → **Release** → *Run workflow* → fill `version` (e.g. `1.10.0`), or run `gh workflow run release.yml --ref master -f version=1.10.0` |
+| Release-candidate / pre-release | Trigger *Run workflow* with `version: 1.10.0-RC1`, or locally: `./gradlew release -Prelease.versionIncrementer=incrementPrerelease` |
+| Manually re-run a failed publish | Re-trigger the workflow on the already-tagged commit — portal-check + release-check steps are idempotent |
+
+Note: `./gradlew markNextVersion -Prelease.version=X.Y.0` influences only what `currentVersion` reports on that branch. It does **not** change what `./gradlew release` picks, because the release task still follows the default patch incrementer unless `-Prelease.version=X.Y.Z` is passed at release time. Use the workflow dispatch above for minor/major bumps instead.
 
 ## License
 
