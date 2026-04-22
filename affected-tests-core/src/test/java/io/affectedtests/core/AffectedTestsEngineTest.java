@@ -568,4 +568,168 @@ class AffectedTestsEngineTest {
                     actual.toAbsolutePath().normalize());
         }
     }
+
+    @Test
+    void discoveryIncompleteEscalatesToFullSuiteInCI() throws Exception {
+        // Regression for B6-#9: when any Java file in the on-disk index
+        // fails to parse, CI mode must stop pretending discovery is
+        // complete. Before the fix parseOrWarn swallowed the failure
+        // and the engine routed through DISCOVERY_EMPTY / DISCOVERY_SUCCESS
+        // based on whatever survived. That produced silent
+        // under-selection on any partially-migrated branch or
+        // half-committed syntax error — exactly the case where you
+        // most need the full suite. Defaults in CI mode must escalate
+        // to FULL_SUITE and tag the escalation reason so the Gradle
+        // task can print a useful explanation.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Path prodDir = tempDir.resolve("src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService {}");
+
+            Path testDir = tempDir.resolve("src/test/java/com/example");
+            Files.createDirectories(testDir);
+            Files.writeString(testDir.resolve("FooServiceTest.java"),
+                    "package com.example;\npublic class FooServiceTest {}");
+            // Unparseable test sibling — UsageStrategy will try to
+            // parse every test file to look for references to the
+            // changed production FQN and ProjectIndex#compilationUnit
+            // will record the failure at the cache boundary. This
+            // mirrors the real-world case we're hardening against:
+            // a half-committed / mid-refactor test file that JavaParser
+            // can't make sense of, silently dropped from the scan
+            // before v1.9.22.
+            Files.writeString(testDir.resolve("BrokenTest.java"),
+                    "package com.example; public class BrokenTest {");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add FooService + broken test sibling").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .mode(Mode.CI)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .strategies(Set.of("usage"))
+                    .transitiveDepth(0)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.DISCOVERY_INCOMPLETE, result.situation(),
+                    "Unparseable Java file must route the engine through DISCOVERY_INCOMPLETE");
+            assertEquals(Action.FULL_SUITE, result.action(),
+                    "CI mode default for DISCOVERY_INCOMPLETE must be FULL_SUITE (safety net)");
+            assertTrue(result.runAll(),
+                    "FULL_SUITE action must set runAll so the Gradle task triggers the whole suite");
+            assertEquals(EscalationReason.RUN_ALL_ON_DISCOVERY_INCOMPLETE,
+                    result.escalationReason(),
+                    "Escalation reason must expose that the cause was parse failures, not generic no-match");
+        }
+    }
+
+    @Test
+    void discoveryIncompleteStillSelectsInLocalMode() throws Exception {
+        // Regression for B6-#9 (local-mode half): developers don't
+        // want to pay a full-suite tax for a syntax error they're
+        // actively editing. LOCAL mode must surface the same
+        // DISCOVERY_INCOMPLETE situation so --explain can warn, but
+        // keep the filtered selection instead of escalating. This
+        // pins the asymmetry between CI (safety-first) and LOCAL
+        // (iteration-speed-first) defaults.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Path prodDir = tempDir.resolve("src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService {}");
+
+            Path testDir = tempDir.resolve("src/test/java/com/example");
+            Files.createDirectories(testDir);
+            Files.writeString(testDir.resolve("FooServiceTest.java"),
+                    "package com.example;\npublic class FooServiceTest {}");
+            Files.writeString(testDir.resolve("BrokenTest.java"),
+                    "package com.example; public class BrokenTest {");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add FooService + broken test sibling").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .mode(Mode.LOCAL)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    // Need both — usage forces a parse of the broken
+                    // file so we hit DISCOVERY_INCOMPLETE, naming then
+                    // supplies FooServiceTest so we can also assert
+                    // the selection survives parse failure.
+                    .strategies(Set.of("usage", "naming"))
+                    .transitiveDepth(0)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.DISCOVERY_INCOMPLETE, result.situation(),
+                    "LOCAL mode must still observe DISCOVERY_INCOMPLETE so --explain / logs stay truthful");
+            assertEquals(Action.SELECTED, result.action(),
+                    "LOCAL mode default for DISCOVERY_INCOMPLETE is SELECTED — iteration speed wins");
+            assertFalse(result.runAll(),
+                    "SELECTED must not trigger a full suite run even with parse failures");
+            assertTrue(result.testClassFqns().contains("com.example.FooServiceTest"),
+                    "Naming-based tests still get discovered from the files that did parse");
+        }
+    }
+
+    @Test
+    void discoveryIncompleteRespectsExplicitOnDiscoveryIncompleteOverride() throws Exception {
+        // Regression for B6-#9 config wiring: the new
+        // onDiscoveryIncomplete builder knob must override the
+        // mode-based default. Without this test a future refactor
+        // that flips the switch inside defaultFor(...) could silently
+        // ignore explicit user configuration. Here we force CI mode
+        // (default FULL_SUITE) but explicitly ask for SKIPPED, which
+        // is the moral equivalent of "I know parse failures exist,
+        // don't run anything, I'll deal with it."
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Path prodDir = tempDir.resolve("src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("FooService.java"),
+                    "package com.example;\npublic class FooService {}");
+
+            Path testDir = tempDir.resolve("src/test/java/com/example");
+            Files.createDirectories(testDir);
+            Files.writeString(testDir.resolve("BrokenTest.java"),
+                    "package com.example; public class BrokenTest {");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add FooService + broken test sibling").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .mode(Mode.CI)
+                    .onDiscoveryIncomplete(Action.SKIPPED)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .strategies(Set.of("usage"))
+                    .transitiveDepth(0)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.DISCOVERY_INCOMPLETE, result.situation());
+            assertEquals(Action.SKIPPED, result.action(),
+                    "Explicit onDiscoveryIncomplete must win over mode default in CI");
+            assertFalse(result.runAll());
+            assertTrue(result.testClassFqns().isEmpty(),
+                    "SKIPPED must yield no selected tests");
+        }
+    }
 }

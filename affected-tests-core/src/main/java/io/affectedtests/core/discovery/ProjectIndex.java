@@ -33,6 +33,18 @@ public final class ProjectIndex {
     private final Map<Path, CompilationUnit> cuCache = new HashMap<>();
     private final JavaParser parser = JavaParsers.newParser();
 
+    // Count of distinct files that {@link JavaParsers#parseOrWarn} returned
+    // null for. The engine consults this after discovery to decide whether
+    // to route through {@link io.affectedtests.core.config.Situation#DISCOVERY_INCOMPLETE}:
+    // a parse failure silently drops the affected file from Usage /
+    // Implementation / Transitive strategies, and before v1.9.22 the only
+    // signal was a WARN at parse time — the engine itself couldn't tell
+    // a clean empty selection apart from "we couldn't read half the
+    // tests". Counting at the index boundary (not at each strategy)
+    // de-duplicates across strategies — the shared cache means one file
+    // parses once per run regardless of how many strategies consult it.
+    private int parseFailureCount = 0;
+
     private ProjectIndex(List<Path> sourceFiles, List<Path> testFiles,
                          Map<String, Path> testFqnToPath, Set<String> sourceFqns) {
         this.sourceFiles = sourceFiles;
@@ -156,6 +168,30 @@ public final class ProjectIndex {
         }
         CompilationUnit cu = JavaParsers.parseOrWarn(parser, file, "index");
         cuCache.put(file, cu);
+        if (cu == null) {
+            // First-time miss for this path: a WARN has already been
+            // emitted by parseOrWarn. Counting here (not at each
+            // strategy call site) naturally de-duplicates — the cached
+            // null return on subsequent calls for the same file does
+            // not re-increment, so a file that fails to parse once is
+            // counted once no matter how many strategies consult it.
+            parseFailureCount++;
+        }
         return cu;
+    }
+
+    /**
+     * Number of distinct scanned files for which {@link #compilationUnit(Path)}
+     * could not produce an AST during this engine run. Non-zero means the
+     * Usage / Implementation / Transitive strategies may have under-
+     * reported their tier: the engine consumes this to route through
+     * {@link io.affectedtests.core.config.Situation#DISCOVERY_INCOMPLETE}
+     * so the configured action (SELECTED / FULL_SUITE / SKIPPED) decides
+     * the outcome instead of the pre-v1.9.22 silent-drop behaviour.
+     *
+     * @return the de-duplicated count of files that failed to parse
+     */
+    public int parseFailureCount() {
+        return parseFailureCount;
     }
 }

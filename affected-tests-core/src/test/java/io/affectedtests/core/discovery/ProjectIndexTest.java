@@ -84,6 +84,63 @@ class ProjectIndexTest {
                 "Literal and glob forms of the same logical rule must produce the same index");
     }
 
+    @Test
+    void parseFailureCountStartsAtZero() throws Exception {
+        // Baseline for the B6-#9 regression: a brand-new index with
+        // no compilationUnit() calls must report zero parse failures,
+        // otherwise the downstream DISCOVERY_INCOMPLETE routing would
+        // fire on every run and blow up {@link io.affectedtests.core.AffectedTestsEngine}
+        // discovery with spurious escalations.
+        writeJava(projectDir.resolve("src/main/java/com/example/Foo.java"),
+                "package com.example; public class Foo {}");
+        writeJava(projectDir.resolve("src/test/java/com/example/FooTest.java"),
+                "package com.example; public class FooTest {}");
+
+        AffectedTestsConfig config = AffectedTestsConfig.builder().mode(Mode.CI).build();
+        ProjectIndex index = ProjectIndex.build(projectDir, config);
+
+        assertEquals(0, index.parseFailureCount(),
+                "A fresh index that never touched compilationUnit() must report zero failures");
+    }
+
+    @Test
+    void parseFailureCountIncrementsOnUnparseableFile() throws Exception {
+        // Regression for B6-#9: a scanned Java file that JavaParser
+        // cannot parse must bump parseFailureCount so the engine can
+        // route through Situation.DISCOVERY_INCOMPLETE instead of
+        // silently under-reporting discovery. Before the fix the
+        // cache hid every null return behind containsKey, so the
+        // engine had no way to tell a clean empty selection apart
+        // from "parse failed, we saw nothing".
+        Path prod = projectDir.resolve("src/main/java/com/example/Foo.java");
+        writeJava(prod, "package com.example; public class Foo {}");
+        // Malformed: missing closing brace, no class declaration.
+        Path broken = projectDir.resolve("src/main/java/com/example/Broken.java");
+        writeJava(broken, "package com.example; public class Broken {");
+
+        AffectedTestsConfig config = AffectedTestsConfig.builder().mode(Mode.CI).build();
+        ProjectIndex index = ProjectIndex.build(projectDir, config);
+
+        // Warm the cache for both files — the working one should
+        // return a non-null CU, the broken one should return null.
+        assertNotNull(index.compilationUnit(prod),
+                "Valid source must still parse — otherwise the counter is counting false positives");
+        assertNull(index.compilationUnit(broken),
+                "Malformed source must still return null (the current parseOrWarn contract)");
+
+        assertEquals(1, index.parseFailureCount(),
+                "Broken file must be counted exactly once — de-dup means a repeat call does not re-count");
+
+        // Hit the cache again to make sure we did not double-count:
+        // the whole point of counting at the cache boundary is that
+        // N strategies can ask for the same file and we still report
+        // a single distinct failure.
+        index.compilationUnit(broken);
+        index.compilationUnit(broken);
+        assertEquals(1, index.parseFailureCount(),
+                "Repeated compilationUnit() calls on the same file must not inflate the count");
+    }
+
     private static void writeJava(Path target, String body) throws Exception {
         Files.createDirectories(target.getParent());
         Files.writeString(target, body);

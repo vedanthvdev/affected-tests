@@ -153,6 +153,116 @@ class AffectedTestsConfigTest {
     }
 
     @Test
+    void modeCiEscalatesDiscoveryIncompleteByDefault() {
+        // Regression for B6-#9 resolver wiring: the new situation has
+        // to map to the mode-specific safety net, not silently default
+        // to the all-pass legacy value. CI (merge-gate) must escalate
+        // a parse-failure run to FULL_SUITE because selection is known
+        // to be under-reported; anything else is a silent safety loss.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.CI)
+                .build();
+        assertEquals(Action.FULL_SUITE, config.actionFor(Situation.DISCOVERY_INCOMPLETE));
+    }
+
+    @Test
+    void modeLocalKeepsDiscoveryIncompleteSelectedByDefault() {
+        // Mirror of modeCi test — LOCAL prefers iteration speed over
+        // safety so defaults to SELECTED (warn-and-continue). If a
+        // future refactor flips this to FULL_SUITE, every dev's
+        // `./gradlew affectedTest` on a branch with one syntax error
+        // suddenly pays a full-suite tax — the regression is painful
+        // and quiet without this pin.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.LOCAL)
+                .build();
+        assertEquals(Action.SELECTED, config.actionFor(Situation.DISCOVERY_INCOMPLETE));
+    }
+
+    @Test
+    void modeStrictEscalatesDiscoveryIncompleteToFullSuite() {
+        // STRICT must never leave DISCOVERY_INCOMPLETE at SELECTED —
+        // the whole point of STRICT is "any doubt means full suite".
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.STRICT)
+                .build();
+        assertEquals(Action.FULL_SUITE, config.actionFor(Situation.DISCOVERY_INCOMPLETE));
+    }
+
+    @Test
+    void explicitOnDiscoveryIncompleteWinsOverModeDefault() {
+        // Same contract as every other on* setter: explicit wins.
+        // Regression catches a refactor that forgets to route
+        // DISCOVERY_INCOMPLETE through the explicit-tier resolver
+        // and falls back to mode default.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.CI)
+                .onDiscoveryIncomplete(Action.SKIPPED)
+                .build();
+        assertEquals(Action.SKIPPED, config.actionFor(Situation.DISCOVERY_INCOMPLETE));
+    }
+
+    @Test
+    void legacyRunAllIfNoMatchesDoesNotOverrideDiscoveryIncomplete() {
+        // Regression for B6-#9 legacy-boolean wiring: DISCOVERY_INCOMPLETE
+        // is a v1.9.22-only situation, so wiring the pre-v2
+        // runAllIfNoMatches shim into it would let a CI caller with
+        // runAllIfNoMatches=false silently opt out of the parse-
+        // failure safety net that the Situation javadoc and README
+        // promise. Since the legacy tier wins over mode defaults in
+        // {@link AffectedTestsConfig#resolveInto}, this test pins
+        // that the legacy argument is deliberately NOT wired for
+        // DISCOVERY_INCOMPLETE — CI + runAllIfNoMatches=false must
+        // still give FULL_SUITE on parse failures, the same as CI
+        // without the legacy flag.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.CI)
+                .runAllIfNoMatches(false)
+                .build();
+        assertEquals(Action.FULL_SUITE, config.actionFor(Situation.DISCOVERY_INCOMPLETE),
+                "runAllIfNoMatches=false must NOT drag DISCOVERY_INCOMPLETE down to SKIPPED — "
+                        + "this is a v2-only situation with no pre-v2 behaviour to preserve, "
+                        + "so CI mode's safety-net FULL_SUITE must survive");
+        assertEquals(ActionSource.MODE_DEFAULT,
+                config.actionSourceFor(Situation.DISCOVERY_INCOMPLETE),
+                "Source must report MODE_DEFAULT — the legacy boolean has no say");
+    }
+
+    @Test
+    void gradlewTimeoutDefaultsToZero() {
+        // Zero means "no deadline" — the pre-v1.9.22 behaviour.
+        // Defaulting to any positive value would retroactively fail
+        // every long-running CI on the upgrade, which is why the
+        // builder defaults to 0 and the Gradle task branches on
+        // `> 0` before spawning a watchdog.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        assertEquals(0L, config.gradlewTimeoutSeconds(),
+                "Default must remain 0 (no timeout) — any other default is a silent breaking change");
+    }
+
+    @Test
+    void gradlewTimeoutAcceptsPositiveValues() {
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .gradlewTimeoutSeconds(1800L)
+                .build();
+        assertEquals(1800L, config.gradlewTimeoutSeconds());
+    }
+
+    @Test
+    void gradlewTimeoutRejectsNegativeValues() {
+        // Negative durations are nonsensical and in practice always
+        // mean a user typo (e.g. -1 meaning "no timeout"). Rejecting
+        // at builder time surfaces the typo immediately instead of
+        // letting it reach ProcessBuilder where the Long gets
+        // interpreted as "wait forever" or worse silently overflows
+        // the TimeUnit conversion.
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().gradlewTimeoutSeconds(-1L).build());
+        assertTrue(e.getMessage().toLowerCase().contains("timeout"),
+                "Error must name the offending setting so the user can find it; got: " + e.getMessage());
+    }
+
+    @Test
     void runAllOnNonJavaChangeFalseTranslatesToSelected() {
         // Pre-v2 callers that opted out of the safety net expected
         // discovery to still run against whatever Java was in the diff.

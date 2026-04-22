@@ -222,6 +222,27 @@ affectedTests {
     onAllFilesOutOfScope   = "skipped"
     onUnmappedFile         = "full_suite"  // the key MR-safety knob
     onDiscoveryEmpty       = "full_suite"  // belt-and-braces for CI
+    // Fires when any scanned Java file failed to parse (malformed source,
+    // half-committed refactor, encoding glitch). Mode defaults: CI / STRICT
+    // escalate to full_suite (selection is known to be under-reported so
+    // safety wins); LOCAL stays on selected (the developer sees the WARN
+    // and values iteration speed on a branch they're actively editing).
+    onDiscoveryIncomplete  = "full_suite"
+
+    // ---------------- Child-process deadline (v1.9.22) ----------------
+
+    // Wall-clock timeout in seconds for the nested `./gradlew :module:test`
+    // invocation. 0 (the default) disables the watchdog and matches
+    // pre-v1.9.22 behaviour — the task waits forever. Positive values
+    // spawn the child under a ProcessBuilder watchdog: on timeout the
+    // task runs destroy() → 10s grace → destroyForcibly() → 5s reap and
+    // then fails the build so a hung test never holds the CI worker
+    // hostage. Note: the watchdog path uses inheritIO for the child's
+    // stdio, so Develocity build-scan stream capture of the nested
+    // output is not available when a timeout is set — leave at 0 and
+    // enforce the deadline at the CI-job level if you rely on scan
+    // ingestion of child-process output.
+    gradlewTimeoutSeconds  = 1800  // 30 min; use 3600 for suites with integration tests
 
     // ---------------- Discovery tuning ----------------
 
@@ -309,6 +330,7 @@ Every row below shows the situation the engine resolved, and the action applied 
 | Any YAML / Gradle / Liquibase / `.java` outside configured dirs | `UNMAPPED_FILE` | `FULL_SUITE` (via `onUnmappedFile = "full_suite"`) | `onUnmappedFile = "selected"` |
 | No changed files at all | `EMPTY_DIFF` | `SKIPPED` | `onEmptyDiff = "full_suite"` / `mode = strict` |
 | Mapping succeeds but discovery returns zero tests | `DISCOVERY_EMPTY` | `SKIPPED` — or `FULL_SUITE` if `mode=ci`/`strict` | `onDiscoveryEmpty` / `mode` |
+| At least one scanned `.java` file failed to parse (malformed / half-committed / encoding glitch) | `DISCOVERY_INCOMPLETE` (takes precedence over both `DISCOVERY_EMPTY` and `DISCOVERY_SUCCESS`) | `SELECTED` — or `FULL_SUITE` if `mode=ci`/`strict` | `onDiscoveryIncomplete` / `mode` |
 | Mixed diff: Java + unmapped file | `UNMAPPED_FILE` (takes precedence) | `FULL_SUITE` | `onUnmappedFile` — set to `"selected"` to fall through to discovery |
 | `baseRef` not resolvable | `FAILED` | Hard error (prevents silent test skipping in CI) | — |
 | Not a git work tree / JGit I/O error | `FAILED` | Hard error | — |

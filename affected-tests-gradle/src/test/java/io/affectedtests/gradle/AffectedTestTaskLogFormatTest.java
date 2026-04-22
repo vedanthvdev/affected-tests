@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -115,7 +116,12 @@ class AffectedTestTaskLogFormatTest {
                 Situation.ALL_FILES_IGNORED,      "every changed file matched ignorePaths",
                 Situation.ALL_FILES_OUT_OF_SCOPE, "every changed file sat under out-of-scope dirs",
                 Situation.UNMAPPED_FILE,          "non-Java or unmapped file in diff",
-                Situation.DISCOVERY_EMPTY,        "no affected tests discovered");
+                Situation.DISCOVERY_EMPTY,        "no affected tests discovered",
+                // DISCOVERY_INCOMPLETE + SKIPPED phrase — the action-
+                // SELECTED variant has its own distinct rendering and
+                // its own regression test below, so this map locks
+                // only the SKIPPED branch.
+                Situation.DISCOVERY_INCOMPLETE,   "discovery observed unparseable files");
 
         expected.forEach((situation, phrase) -> {
             AffectedTestsResult skipped = new AffectedTestsResult(
@@ -141,15 +147,60 @@ class AffectedTestTaskLogFormatTest {
         // returned tests we never skip. The helper must fail loudly so
         // such a drift cannot surface a placeholder phrase in CI.
         assertThrows(IllegalStateException.class,
-                () -> AffectedTestTask.describeSkipReason(Situation.DISCOVERY_SUCCESS),
-                "describeSkipReason(DISCOVERY_SUCCESS) must throw — that combination is an "
+                () -> AffectedTestTask.describeSkipReason(Situation.DISCOVERY_SUCCESS, Action.SKIPPED),
+                "describeSkipReason(DISCOVERY_SUCCESS, *) must throw — that combination is an "
                         + "engine contract violation, not a log-formatting concern");
     }
 
     @Test
     void describeSkipReasonRejectsNull() {
         assertThrows(NullPointerException.class,
-                () -> AffectedTestTask.describeSkipReason(null));
+                () -> AffectedTestTask.describeSkipReason(null, Action.SKIPPED));
+        assertThrows(NullPointerException.class,
+                () -> AffectedTestTask.describeSkipReason(Situation.EMPTY_DIFF, null));
+    }
+
+    @Test
+    void discoveryIncompleteSelectedBranchDoesNotClaimSkipped() {
+        // Regression for the B6-#9 summary-line bug: DISCOVERY_INCOMPLETE
+        // with action=SELECTED and an empty selection (the LOCAL-mode
+        // default) winds up on the skipped-summary branch via
+        // emptyResult's skipped-flag rule, but the summary prefix
+        // still correctly reads `SELECTED (DISCOVERY_INCOMPLETE)`.
+        // Before the action-aware rendering, the reason phrase said
+        // `onDiscoveryIncomplete=SKIPPED — ...`, producing a line that
+        // contained both `SELECTED` and `SKIPPED` and contradicted
+        // itself. Pinning the truthful variant keeps renderer and
+        // resolver honest.
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of(), Set.of(),
+                Buckets.empty(),
+                false, true,
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED,
+                EscalationReason.NONE);
+        String summary = render(AffectedTestTask.renderSummary(result));
+
+        assertTrue(summary.contains("SELECTED (DISCOVERY_INCOMPLETE)"),
+                "Prefix must name the resolved action, not the skipped flag");
+        assertFalse(summary.contains("SKIPPED"),
+                "Summary must not contain the SKIPPED literal when action=SELECTED; got: " + summary);
+        assertTrue(summary.contains("no affected tests matched the parsed files"),
+                "Reason phrase must describe the SELECTED+empty outcome honestly; got: " + summary);
+    }
+
+    @Test
+    void describeSkipReasonBranchesOnActionForDiscoveryIncomplete() {
+        // Unit-level pin for the helper directly — protects against a
+        // refactor that loses the action branch inside describeSkipReason
+        // even if the summary renderer swallows the difference.
+        assertEquals(
+                "onDiscoveryIncomplete=SKIPPED — discovery observed unparseable files",
+                AffectedTestTask.describeSkipReason(Situation.DISCOVERY_INCOMPLETE, Action.SKIPPED));
+        assertEquals(
+                "onDiscoveryIncomplete=SELECTED — no affected tests matched the parsed files",
+                AffectedTestTask.describeSkipReason(Situation.DISCOVERY_INCOMPLETE, Action.SELECTED));
     }
 
     @Test
