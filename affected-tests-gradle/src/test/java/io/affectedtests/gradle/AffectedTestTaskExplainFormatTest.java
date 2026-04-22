@@ -404,6 +404,130 @@ class AffectedTestTaskExplainFormatTest {
     }
 
     @Test
+    void hintDoesNotFireOnAllFilesIgnored() {
+        // Regression for Finding 1 from the v1.9.17 sanity-test pass on
+        // security-service: a markdown-only MR routed through
+        // ALL_FILES_IGNORED, yet the hint fired saying "outOfScopeTestDirs
+        // is configured but no file in the diff matched". Literally true
+        // but pure noise — the diff contained nothing a source-tree
+        // matcher could ever have bitten, so there is nothing for the
+        // operator to diagnose. Suppressing here prevents the hint from
+        // training reviewers to ignore it on every docs-only MR.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("docs/README.md"),
+                Set.of(), Set.of(),
+                new Buckets(Set.of("docs/README.md"),
+                        Set.of(), Set.of(), Set.of(), Set.of()),
+                false, true,
+                Situation.ALL_FILES_IGNORED, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must stay silent on ALL_FILES_IGNORED — the diff contained nothing "
+                        + "that could have matched an out-of-scope pattern, so diagnosis is impossible");
+    }
+
+    @Test
+    void hintDoesNotFireOnUnmappedFileEscalation() {
+        // Regression for Finding 1: a gradle-file-only MR routed through
+        // UNMAPPED_FILE → FULL_SUITE, yet the hint fired. The gradle file
+        // was never a candidate for out-of-scope matching (it is not
+        // under any source tree), so the hint adds no diagnostic value
+        // and obscures the already-present "why did we run the full
+        // suite" signal. Also covers mixed diffs that route through
+        // UNMAPPED_FILE via an unrelated non-Java file.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("build.gradle"),
+                Set.of(), Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of(), Set.of(),
+                        Set.of("build.gradle")),
+                true, false,
+                Situation.UNMAPPED_FILE, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must stay silent on UNMAPPED_FILE — the diff's unmapped files "
+                        + "could not have matched any out-of-scope source/test pattern");
+    }
+
+    @Test
+    void hintFiresOnDiscoveryEmptyFullSuiteEscalation() {
+        // Positive case: when the diff changed real production code but
+        // discovery found zero affected tests, the engine escalates to
+        // FULL_SUITE under the CI mode's safety net. The hint is STILL
+        // useful here — if the user had outOfScopeSourceDirs meant to
+        // exclude this production file from dispatching tests and the
+        // pattern silently didn't bite, the FULL_SUITE escalation is the
+        // unnecessary waste the hint exists to expose. Lock in that the
+        // situation-gate in appendOutOfScopeHint includes DISCOVERY_EMPTY
+        // alongside DISCOVERY_SUCCESS.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeSourceDirs(List.of("legacy-service/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                true, false,
+                Situation.DISCOVERY_EMPTY, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_IF_NO_MATCHES);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("Hint:"),
+                "Hint must fire on DISCOVERY_EMPTY too — that's the case where an "
+                        + "over-broad source file that should have been out-of-scope is what "
+                        + "drove the unnecessary FULL_SUITE escalation");
+    }
+
+    @Test
+    void hintDoesNotFireOnAllFilesOutOfScope() {
+        // Gate invariant: when every file landed in the out-of-scope
+        // bucket there is nothing silent to diagnose — the config IS
+        // biting, just hard enough to empty the discovery input. The
+        // pre-existing bucket-non-empty guard in appendOutOfScopeHint
+        // suppresses this case today; pinning the situation-gate here
+        // keeps the two guards from drifting apart if either gets
+        // refactored.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("api-test/src/test/java/com/example/ApiFooTest.java"),
+                Set.of(), Set.of(),
+                new Buckets(Set.of(),
+                        Set.of("api-test/src/test/java/com/example/ApiFooTest.java"),
+                        Set.of(), Set.of(), Set.of()),
+                false, true,
+                Situation.ALL_FILES_OUT_OF_SCOPE, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must stay silent on ALL_FILES_OUT_OF_SCOPE — the config is biting as "
+                        + "intended and there is nothing silent to diagnose");
+    }
+
+    @Test
     void hintDoesNotFireOnEmptyDiff() {
         // Negative case: with no changed files the hint has nothing to
         // diagnose — there's no diff for the config to have bitten. We

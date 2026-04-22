@@ -58,6 +58,62 @@ adheres to [Semantic Versioning](https://semver.org/).
   malformed-glob error path is now the single source of truth for
   `Affected Tests: invalid glob at outOfScope*Dirs[N]` messages.
 
+### Fixed — post-v1.9.17 sanity-test pass
+
+- The `Hint:` line on `affectedTest --explain` no longer fires on
+  situations where an out-of-scope pattern could not have mattered.
+  Running v1.9.17 through nine representative MR shapes on the
+  security-service pilot (empty diff, api-test-only, performance-test-
+  only, production Java only, markdown only, mixed api-test + prod,
+  test-only, `git rm` markdown, gradle + prod) showed the hint firing
+  on five of them — including a bare markdown-only MR where the diff
+  contained nothing a source-tree matcher could have bitten. That
+  5-of-9 false-positive rate trains reviewers to ignore the line,
+  defeating its purpose.
+
+  The hint now requires the situation to be `DISCOVERY_SUCCESS` or
+  `DISCOVERY_EMPTY` (the only two branches where a correctly-configured
+  out-of-scope pattern could have changed the outcome) in addition to
+  the existing "diff non-empty AND out-of-scope bucket empty AND at
+  least one out-of-scope dir configured" guard. `EMPTY_DIFF`,
+  `ALL_FILES_IGNORED`, `ALL_FILES_OUT_OF_SCOPE`, and `UNMAPPED_FILE`
+  all suppress the hint — none of them is a case where an operator
+  could act on it.
+
+- Lifecycle output for `SELECTED` dispatches now previews the first
+  five FQNs per module with a "… and N more (use --info for full list)"
+  tail on larger dispatches. Pre-v1.9.18 the task printed only the
+  module summary at lifecycle level and demoted every FQN to info,
+  leaving a reviewer scrolling the default CI log unable to see *which*
+  tests were selected without either rerunning with `--info` or opening
+  the JUnit report after the fact. The info-level per-FQN log is
+  retained for `--info` users, and the bounded preview keeps total
+  lifecycle output well under the 4 MiB GitHub Actions step cap that
+  forced the demotion in the first place.
+
+- Dispatch-side FQN validation was hoisted out of the per-module log
+  loop so the "Running N affected test classes across M module(s)"
+  header now reports the post-validation count and stays arithmetically
+  consistent with the per-module previews underneath it. If any FQNs
+  were skipped (an `isValidFqn` WARN was already logged) the header
+  gains a ` (K malformed FQN skipped — see WARN above)` suffix so the
+  mismatch between "discovered" and "dispatched" is visible at a
+  glance rather than a puzzle only the WARN log can solve. Two latent
+  side-effects fall out of the refactor:
+  - A module whose entire discovered FQN set fails validation is now
+    dropped from dispatch. Pre-v1.9.18 the task appended that module's
+    bare `taskPath` with no `--tests` filter, which silently degraded
+    into a full module test suite run — the exact safety posture
+    `isValidFqn` was added to prevent. Operators relying on this
+    accidental fallback should configure `runAllIfNoMatches = true` /
+    `Action.FULL_SUITE` explicitly instead.
+  - A dispatch where zero FQNs survive validation across ALL modules
+    now throws `GradleException` instead of invoking Gradle with an
+    empty task list (environment-dependent behaviour, ranging from
+    "fail with No tasks specified" to "silently run the default task").
+    The WARN logs above the failure name every rejected FQN, so the
+    mis-discovery is diagnosable from the same console output.
+
 ### Fixed — post-v1.9.16 review batch
 
 - `GitChangeDetector.uncommittedChanges` and `stagedChanges` now
