@@ -21,10 +21,11 @@ package io.affectedtests.core.config;
  * </table>
  *
  * <p>The pre-v2 zero-config baseline was
- * {@code runAllIfNoMatches=false}, {@code runAllOnNonJavaChange=true} —
- * which translates to the {@link #LOCAL} column above minus the
- * {@code DISCOVERY_EMPTY=FULL_SUITE} CI safety net. Zero-config users
- * running in CI now get the safer default without having to opt in.
+ * {@code runAllIfNoMatches=false}, {@code runAllOnNonJavaChange=true}
+ * — which lines up exactly with the {@link #LOCAL} column above. The
+ * {@link #CI} profile adds the {@code DISCOVERY_EMPTY=FULL_SUITE}
+ * safety net on top of that so zero-config users who land in a CI
+ * environment get the safer default without having to opt in.
  */
 public enum Mode {
     /** Detect CI vs. local at build() time based on common CI env vars. */

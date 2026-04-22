@@ -72,6 +72,39 @@ class ImplementationStrategyTest {
     }
 
     @Test
+    void findsTestForDefaultPrefixedImplementation() throws IOException {
+        // Regression: the config ships with implementationNaming =
+        // {"Impl", "Default"}, but the naming-convention loop used
+        // to append both tokens as suffixes — FooServiceImpl matched,
+        // FooServiceDefault did not because nobody writes
+        // FooServiceDefault; real Spring/Guice code writes
+        // DefaultFooService. The AST branch rescues the explicit
+        // "implements FooService" case, but diffs where the super
+        // type is inferred (generics-only declarations, or files
+        // JavaParser couldn't parse) silently missed the Default-
+        // prefixed impl. Lock in the prefix shape explicitly.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("FooService.java"),
+                "package com.example;\npublic interface FooService {}");
+        // No "implements FooService" written — force the naming-
+        // convention branch to do the work alone.
+        Files.writeString(prodDir.resolve("DefaultFooService.java"),
+                "package com.example;\npublic class DefaultFooService {}");
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("DefaultFooServiceTest.java"),
+                "package com.example;\npublic class DefaultFooServiceTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.FooService"), tempDir);
+
+        assertTrue(result.contains("com.example.DefaultFooServiceTest"),
+                "Should find the DefaultFooServiceTest via the prefix-shape naming convention");
+    }
+
+    @Test
     void returnsEmptyWhenDisabled() throws IOException {
         AffectedTestsConfig config = AffectedTestsConfig.builder()
                 .includeImplementationTests(false)

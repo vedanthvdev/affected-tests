@@ -4,6 +4,7 @@ import io.affectedtests.core.config.AffectedTestsConfig;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffEntry;
+import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.NoWorkTreeException;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -26,10 +27,20 @@ import java.util.Set;
  * Detects changed files using JGit by comparing the current HEAD (and optionally
  * uncommitted changes) against a configurable base ref.
  *
- * <p>Paths for {@code DELETE} changes and the old path of a {@code RENAME} are
- * intentionally omitted from the result. Including them would lead the engine to
- * try and re-run tests that no longer exist on disk, which Gradle rejects with
- * {@code No tests found for given includes}.
+ * <p>{@code DELETE} changes surface through the old path so a pure-deletion
+ * MR is NOT bucketed as an empty diff. The engine's dispatch filter at
+ * {@link io.affectedtests.core.AffectedTestsEngine} drops any FQN whose
+ * test file no longer exists on disk, so emitting the deleted path is safe
+ * — it routes the diff through the normal ignore / out-of-scope / unmapped
+ * logic (so a deleted {@code *.md} still gets ignored, a deleted
+ * {@code api-test/**} still counts as out-of-scope, and a deleted production
+ * class still pushes discovery through the transitive strategy for callers
+ * whose tests may have started failing).
+ *
+ * <p>The old path of a {@code RENAME} is still dropped in favour of the
+ * new path alone; the new path is the file currently on disk and the
+ * file the diff actually modified, so adding the old path would only
+ * double-count.
  */
 public final class GitChangeDetector {
 
@@ -75,6 +86,21 @@ public final class GitChangeDetector {
             // is not inside a git work tree at all.
             throw new IllegalStateException(
                     "Affected Tests: directory '" + projectDir + "' is not a git work tree.", e);
+        } catch (MissingObjectException e) {
+            // Surfaces separately from generic IOException because this is
+            // overwhelmingly the "shallow clone" failure mode — JGit resolved
+            // the ref to an ObjectId but the commit object isn't in the local
+            // pack. The actions/checkout default is fetch-depth=1, so the
+            // first CI run on a new pipeline hits this and the generic
+            // "I/O error while reading git metadata" message sends operators
+            // hunting for disk or JGit problems instead of the real fix.
+            throw new IllegalStateException(
+                    "Affected Tests: base commit " + e.getObjectId().name()
+                            + " for ref '" + config.baseRef() + "' is not available locally. "
+                            + "This usually means the repository is a shallow clone. "
+                            + "Run 'git fetch --unshallow' locally, or set fetch-depth: 0 on "
+                            + "actions/checkout (GitHub) / GIT_DEPTH: 0 (GitLab).",
+                    e);
         } catch (IOException e) {
             throw new IllegalStateException(
                     "Affected Tests: I/O error while reading git metadata at '" + projectDir + "': "
@@ -118,9 +144,18 @@ public final class GitChangeDetector {
             switch (entry.getChangeType()) {
                 case ADD, COPY, MODIFY -> files.add(entry.getNewPath());
                 case DELETE -> {
-                    // Deleted files have no matching class on disk; adding them would
-                    // cause downstream "No tests found" failures for deleted tests
-                    // and is pointless for deleted production classes.
+                    // Before we surfaced DELETEs, a pure 'git rm' MR routed
+                    // through EMPTY_DIFF and — in LOCAL/CI modes — silently
+                    // skipped all tests. Now the old path flows through the
+                    // normal bucketing so ignore/out-of-scope rules still
+                    // apply (deleted '*.md' stays ignored, deleted
+                    // 'api-test/**' stays out-of-scope, deleted production
+                    // classes reach the transitive strategy). The engine's
+                    // existing filter at AffectedTestsEngine drops any
+                    // discovered FQN whose test file no longer exists, so
+                    // surfacing the deleted path never asks Gradle to run a
+                    // missing test.
+                    files.add(entry.getOldPath());
                 }
                 case RENAME -> files.add(entry.getNewPath());
             }

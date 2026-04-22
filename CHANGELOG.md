@@ -51,6 +51,91 @@ adheres to [Semantic Versioning](https://semver.org/).
   CI run. The hint is suppressed on empty diffs, on runs where the
   bucket is non-empty, and on zero-config installs — so its rarity is
   itself a signal.
+- `OutOfScopeMatchers` — an internal utility shared between
+  `PathToClassMapper` and `ProjectIndex`. Not a public API, but
+  called out here because it is the structural fix behind the
+  glob-alignment bug in the Fixed section below, and because its
+  malformed-glob error path is now the single source of truth for
+  `Affected Tests: invalid glob at outOfScope*Dirs[N]` messages.
+
+### Fixed — post-v1.9.15 review batch
+
+- `outOfScopeTestDirs` / `outOfScopeSourceDirs` glob entries now work
+  on both sides of the pipeline. Before this fix the diff-side
+  classifier in `PathToClassMapper` honoured `"api-test/**"` but the
+  on-disk classifier in `ProjectIndex` treated the same string as a
+  literal prefix, so a mixed diff (one production file + a refactor
+  under `api-test/`) bucketed the api-test file correctly yet still
+  dispatched tests discovered under `api-test/src/test/java`. Both
+  sides now delegate to a shared compiler, with a regression test that
+  exercises the literal and glob shapes against identical on-disk
+  layouts.
+- `git rm`-only MRs no longer silently skip all tests. `DiffEntry.DELETE`
+  entries now surface through their old path, so ignore/out-of-scope
+  rules apply normally and deleted production classes reach the
+  transitive strategy instead of routing the whole MR through
+  `EMPTY_DIFF → SKIPPED` under `local`/`ci` mode. The existing engine
+  filter still drops FQNs whose backing file is gone, so surfacing
+  deletions never asks Gradle to run a missing test.
+- `ImplementationStrategy` now recognises the `DefaultFooService`
+  prefix shape, not only the `FooServiceImpl` suffix. The plugin has
+  always shipped `implementationNaming = ["Impl", "Default"]` and the
+  Javadoc documents both shapes, but the naming-convention loop used
+  to append both tokens as suffixes (`FooServiceDefault`), matching
+  nothing real. The AST-scan branch rescued explicit
+  `implements FooService` cases; generics-only declarations and files
+  that JavaParser couldn't parse silently missed the Default-prefixed
+  impl.
+- Turkish (and any other locale whose case-folding tables differ from
+  US English) no longer turn `mode = "ci"` into `Unknown
+  affectedTests.mode 'ci'`. `parseMode` and `parseAction` now force
+  `Locale.ROOT`, matching `AffectedTestsConfig`'s own parsing. The
+  Windows detection in the Gradle-command resolver was pinned to
+  `Locale.ROOT` for the same reason.
+- `PathToClassMapper.isIgnored` and the `OutOfScopeMatchers` glob
+  matchers now fail closed on `InvalidPathException` (NUL bytes,
+  Linux-committed filenames like `foo:bar.md` arriving on a Windows
+  CI runner, Windows reserved names). Before this fix the unhandled
+  exception killed the whole `affectedTest` task with a stack trace;
+  now the offending file falls through to the unmapped bucket and the
+  safety net escalates normally.
+- `GitChangeDetector` now translates JGit's `MissingObjectException`
+  into a targeted message naming the likely cause: a shallow clone in
+  CI that doesn't know the base ref. Before, users saw the raw JGit
+  exception and had to guess whether the problem was the ref, the
+  clone depth, or a corrupt repo.
+- Malformed globs in `outOfScopeTestDirs` / `outOfScopeSourceDirs` /
+  `ignorePaths` now fail at config-time with an
+  `IllegalStateException` naming the config key, list index, and
+  offending pattern. The raw `PatternSyntaxException` the JVM throws
+  is useless on its own because it doesn't say which config entry
+  caused the regex error.
+- The `--tests` argv assembly now skips and warns on any discovered
+  FQN that isn't shaped like a Java identifier. Defense-in-depth
+  against a buggy custom strategy or parser anomaly injecting a shell
+  metacharacter, whitespace, or a hyphen into Gradle's test filter —
+  such strings either crashed the test runner with an obscure glob-
+  expansion error or silently matched zero tests.
+- Per-FQN dispatch lines in the task output demoted from `lifecycle`
+  to `info`. Each MR now gets one `lifecycle` summary per Gradle task
+  (`:api:test (3 test classes)`); the individual FQNs print only when
+  the user opts in with `--info`. Before, a 200-class MR produced 200
+  console lines and drowned the single line the user actually cared
+  about — the outcome/situation summary.
+
+### Documentation
+
+- `Mode` Javadoc now matches the mode-defaults table in the design
+  doc. The post-v2 table said zero-config CI users get
+  `DISCOVERY_EMPTY = FULL_SUITE` on top of `LOCAL`, but the class-
+  level doc still described `LOCAL` as the pre-v2 baseline "minus"
+  the safety net.
+- `Situation` Javadoc cross-reference for `ALL_FILES_OUT_OF_SCOPE`
+  updated — the old reference pointed at a since-renamed constant.
+- `TransitiveStrategy` and `AffectedTestsExtension` now document the
+  actual `transitiveDepth` default of `4`, not the pre-v2 value of
+  `2`. Consumers reading Javadoc were being told they needed to set
+  `transitiveDepth = 4` explicitly; they do not.
 
 ## [1.9.12] — 2026-04-22
 

@@ -23,7 +23,7 @@ import java.util.*;
  * changes, walks this "used-by" graph N levels deep to find consumers, then
  * discovers tests for those consumers via the naming and usage strategies.
  * <p>
- * Depth is configurable via {@code transitiveDepth} (default 2, max 5).
+ * Depth is configurable via {@code transitiveDepth} (default 4, max 5).
  */
 public final class TransitiveStrategy implements TestDiscoveryStrategy {
 

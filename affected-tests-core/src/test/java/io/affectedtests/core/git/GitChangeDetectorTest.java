@@ -146,6 +146,44 @@ class GitChangeDetectorTest {
     }
 
     @Test
+    void detectsDeletedFilesByOldPath() throws Exception {
+        // Regression: before this fix, a pure `git rm` MR produced zero
+        // entries in the diff (because DELETE's newPath is /dev/null and
+        // the detector only recorded newPath). That routed the whole MR
+        // through EMPTY_DIFF, which in LOCAL/CI modes silently skips all
+        // tests — the exact "run more, never less" violation the plugin
+        // is designed to prevent. Surfacing the old path lets the engine
+        // bucket the deletion correctly: ignored globs still ignore it,
+        // out-of-scope dirs still ignore it, and production-code deletes
+        // reach the transitive strategy like any other change.
+        try (Git git = initRepoWithInitialCommit()) {
+            File doomed = tempDir.resolve("src/main/java/com/example/Doomed.java").toFile();
+            doomed.getParentFile().mkdirs();
+            Files.writeString(doomed.toPath(), "package com.example;\npublic class Doomed {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("add Doomed").call();
+
+            String baseCommit = git.log().call().iterator().next().getName();
+
+            // Delete the file on a follow-up commit
+            git.rm().addFilepattern("src/main/java/com/example/Doomed.java").call();
+            git.commit().setMessage("remove Doomed").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(baseCommit)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+            Set<String> changed = detector.detectChangedFiles();
+
+            assertTrue(changed.contains("src/main/java/com/example/Doomed.java"),
+                    "Deleted file must surface through its old path so the engine can bucket it");
+        }
+    }
+
+    @Test
     void failsLoudlyOnNonGitDirectory() {
         Path nonGitDir = tempDir.resolve("not-a-repo");
         nonGitDir.toFile().mkdirs();
