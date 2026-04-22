@@ -31,7 +31,7 @@ plugins {
 
 Prints the full decision trace — bucket counts, situation, action, and the tier of the priority ladder (explicit / legacy / mode / hardcoded) that picked each action — without running a single test. Useful when a CI run escalated to the full suite and the operator needs to know *why* before filing a bug.
 
-When `outOfScopeTestDirs` / `outOfScopeSourceDirs` are configured but zero files in the diff land in the out-of-scope bucket, the trace emits a one-line `Hint:` pointing at the configured knob. That's the silent-failure trap a real adopter hit: a perfectly valid-looking glob that never bit anything, which the plugin would otherwise only surface after a 30-minute full-suite CI run.
+When `outOfScopeTestDirs` / `outOfScopeSourceDirs` are configured but zero files in the diff land in the out-of-scope bucket *and* the situation is `DISCOVERY_SUCCESS` or `DISCOVERY_EMPTY`, the trace emits a one-line `Hint:` pointing at the configured knob. That's the silent-failure trap a real adopter hit: a perfectly valid-looking glob that never bit anything, which the plugin would otherwise only surface after a 30-minute full-suite CI run. The hint is suppressed on `EMPTY_DIFF`, `ALL_FILES_IGNORED`, `ALL_FILES_OUT_OF_SCOPE`, and `UNMAPPED_FILE` because those branches ran the way they did for reasons an out-of-scope pattern could not have influenced.
 
 Sample output:
 
@@ -101,6 +101,27 @@ Affected Tests: SKIPPED (ALL_FILES_IGNORED) — 1 changed file(s); every changed
 ```
 
 The outcome (`SELECTED` / `FULL_SUITE` / `SKIPPED`) and the situation that produced it are first-class fields on every branch, so CI dashboards can `grep -E '^Affected Tests: (SELECTED|FULL_SUITE|SKIPPED)'` and bucket runs without parsing the tail. Every pre-v2 phrase (`running full suite`, `runAllIfNoMatches=true`, `runAllOnNonJavaChange=true`, `no affected tests discovered`) still appears verbatim in the reason segment, so existing greps keep working.
+
+On a `SELECTED` outcome, the task also prints the first few FQNs per module at lifecycle level so a reviewer can sanity-check the dispatch from the default CI log without rerunning with `--info`:
+
+```
+Running 17 affected test classes across 2 module(s):
+  application:test (12 test classes)
+    com.example.auth.LoginControllerTest
+    com.example.auth.TokenServiceTest
+    com.example.auth.PasswordHasherTest
+    com.example.auth.SessionRepositoryTest
+    com.example.auth.RoleMapperTest
+    … and 7 more (use --info for full list)
+  api:test (5 test classes)
+    com.example.api.PublicEndpointsTest
+    com.example.api.RateLimitTest
+    com.example.api.VersionHeaderTest
+    com.example.api.ErrorFormatTest
+    com.example.api.HealthProbeTest
+```
+
+The preview caps at five FQNs per module; `--info` still surfaces the full per-FQN list. The cap exists so a utility change that ripples into hundreds of test classes can't blow past the 4 MiB GitHub Actions per-step log cap before the nested test output even starts.
 
 ### Situations (what the engine saw)
 

@@ -505,43 +505,82 @@ public abstract class AffectedTestTask extends DefaultTask {
             // happen to contain the FQN).
             Map<String, List<String>> grouped = groupFqnsByModule(projectDir, testFqns, fqnToPath);
 
-            getLogger().lifecycle("Running {} affected test classes across {} module(s):",
-                    testFqns.size(), grouped.size());
-
+            // Validate every discovered FQN up front so the header,
+            // per-module preview, and argv-append stay arithmetically
+            // consistent. Splitting validation from dispatch also
+            // means a module whose entire discovered set is malformed
+            // (vanishingly unlikely in practice, but possible from a
+            // buggy custom strategy) is dropped cleanly instead of
+            // silently falling through to "run the whole module's
+            // test suite" once the bare `taskPath` is appended to the
+            // argv with no `--tests` filter.
+            Map<String, List<String>> validatedGroups = new LinkedHashMap<>(grouped.size());
+            int totalValid = 0;
             for (Map.Entry<String, List<String>> entry : grouped.entrySet()) {
                 String modulePath = entry.getKey();
-                List<String> fqnsForModule = entry.getValue();
-
                 String taskPath = modulePath.isEmpty() ? "test" : modulePath + ":test";
-                args.add(taskPath);
-                // One module-level lifecycle line; the per-FQN entries
-                // are info-level because they can legitimately run into
-                // the thousands on a widely-used utility change and
-                // spamming lifecycle can blow past CI log-size caps
-                // (GitHub Actions truncates at 4 MiB/step) before the
-                // nested test output even starts.
-                getLogger().lifecycle("  {} ({} test class{})",
-                        taskPath, fqnsForModule.size(), fqnsForModule.size() == 1 ? "" : "es");
-                for (String fqn : fqnsForModule) {
+                List<String> valid = new ArrayList<>(entry.getValue().size());
+                for (String fqn : entry.getValue()) {
                     if (!isValidFqn(fqn)) {
-                        // Defence in depth against a compromised source tree
-                        // sneaking shell-like tokens into a --tests argument.
-                        // Gradle's CLI parser currently treats the next argv
-                        // element as the value of --tests regardless of
-                        // content, but that's an undocumented contract and a
-                        // future parser change would turn this into real
-                        // argument injection. Non-Java-shaped FQNs cannot
-                        // correspond to a real JVM test class anyway, so
-                        // dropping them costs nothing and forces the bad
-                        // input to surface visibly.
+                        // Defence in depth against a compromised source
+                        // tree sneaking shell-like tokens into a --tests
+                        // argument. The FQN cannot correspond to a real
+                        // JVM test class, so dropping it is lossless.
                         getLogger().warn(
                                 "Affected Tests: skipping malformed test FQN '{}' for task {} — "
                                         + "not a Java-shaped identifier, cannot correspond to a "
                                         + "real test class.", fqn, taskPath);
                         continue;
                     }
+                    valid.add(fqn);
+                }
+                if (!valid.isEmpty()) {
+                    validatedGroups.put(taskPath, valid);
+                    totalValid += valid.size();
+                }
+            }
+
+            int skipped = testFqns.size() - totalValid;
+
+            // Belt-and-braces: a dispatch with zero surviving FQNs
+            // across ALL modules would otherwise produce an argv of
+            // `[gradlew, -x, compileJava]` with no task specified —
+            // Gradle's behavior there (fail vs. default-task) is
+            // environment-dependent and definitely not the safety
+            // posture `runAll` promises. If we get here the WARN logs
+            // above already explain which FQNs were dropped; a hard
+            // fail surfaces the mis-discovery instead of silently
+            // running nothing.
+            if (validatedGroups.isEmpty()) {
+                throw new GradleException(
+                        "Affected Tests: every discovered FQN (" + testFqns.size()
+                                + ") was malformed and skipped — refusing to dispatch a taskless "
+                                + "Gradle invocation. See WARN logs above for the rejected FQNs.");
+            }
+
+            String skippedSuffix = skipped == 0
+                    ? ""
+                    : " (" + skipped + (skipped == 1 ? " malformed FQN skipped" : " malformed FQNs skipped")
+                            + " — see WARN above)";
+            getLogger().lifecycle("Running {} affected test classes across {} module(s):{}",
+                    totalValid, validatedGroups.size(), skippedSuffix);
+
+            // Dispatch-side emission. Lifecycle per module is bounded
+            // by LIFECYCLE_FQN_PREVIEW_LIMIT; the full list stays at
+            // info level (see that constant's Javadoc for why).
+            for (Map.Entry<String, List<String>> entry : validatedGroups.entrySet()) {
+                String taskPath = entry.getKey();
+                List<String> validFqns = entry.getValue();
+
+                args.add(taskPath);
+                for (String fqn : validFqns) {
                     args.add("--tests");
                     args.add(fqn);
+                }
+
+                renderLifecycleDispatchPreview(taskPath, validFqns)
+                        .forEach(getLogger()::lifecycle);
+                for (String fqn : validFqns) {
                     getLogger().info("  {} -> {}", taskPath, fqn);
                 }
             }
@@ -748,6 +787,56 @@ public abstract class AffectedTestTask extends DefaultTask {
     static final int EXPLAIN_SAMPLE_LIMIT = 10;
 
     /**
+     * Cap on FQNs listed at lifecycle level per module in the
+     * "Running N affected test classes" dispatch output. Chosen at 5
+     * to keep the preview tight enough that a reviewer can read it
+     * without scrolling yet large enough to sanity-check selection on
+     * most MRs, which dispatch single digits of classes per module.
+     * Larger dispatches still log every FQN at info level — this cap
+     * exists only to keep the default lifecycle log bounded and well
+     * under the 4 MiB GitHub Actions step cap that forced the
+     * per-FQN demotion in pre-v1.9.18 versions.
+     */
+    static final int LIFECYCLE_FQN_PREVIEW_LIMIT = 5;
+
+    /**
+     * Renders the lifecycle-level dispatch preview for a single
+     * module: the summary line, then up to
+     * {@link #LIFECYCLE_FQN_PREVIEW_LIMIT} FQNs indented underneath,
+     * and — when the dispatch exceeds the preview limit — a single
+     * "… and N more (use --info for full list)" tail.
+     *
+     * <p>Package-private so
+     * {@code AffectedTestTaskDispatchPreviewTest} can pin the format
+     * without spinning up the Gradle runtime. The helper is pure over
+     * its inputs, so the test treats it as a pure function and the
+     * caller in {@link #executeTests} just pipes each returned line
+     * to {@link org.gradle.api.logging.Logger#lifecycle(String)}.
+     *
+     * @param taskPath the Gradle task path the dispatch targets (for
+     *                 example {@code "application:test"})
+     * @param fqns     the validated FQNs being dispatched, in the
+     *                 order they will be passed to Gradle; preserving
+     *                 this order in the preview keeps the mental map
+     *                 from "what did I change" to "what is running"
+     *                 intact for the operator
+     */
+    static List<String> renderLifecycleDispatchPreview(String taskPath, List<String> fqns) {
+        List<String> lines = new ArrayList<>(Math.min(fqns.size(), LIFECYCLE_FQN_PREVIEW_LIMIT) + 2);
+        int size = fqns.size();
+        String plural = size == 1 ? "" : "es";
+        lines.add("  " + taskPath + " (" + size + " test class" + plural + ")");
+        int preview = Math.min(size, LIFECYCLE_FQN_PREVIEW_LIMIT);
+        for (int i = 0; i < preview; i++) {
+            lines.add("    " + fqns.get(i));
+        }
+        if (size > preview) {
+            lines.add("    … and " + (size - preview) + " more (use --info for full list)");
+        }
+        return lines;
+    }
+
+    /**
      * Renders the human-readable decision trace produced by
      * {@code affectedTest --explain}. Returned as a list of lines so the
      * caller can hand each line to {@link org.gradle.api.logging.Logger#lifecycle(String)}
@@ -837,22 +926,33 @@ public abstract class AffectedTestTask extends DefaultTask {
      * package-private so the explain-format tests can pin the exact
      * conditions without spinning up Gradle.
      *
-     * <p>The hint fires only when all three conditions hold:
-     * <ul>
-     *   <li>at least one changed file exists (nothing to diagnose on
-     *       an empty diff, and a re-run after every merge to master
-     *       would otherwise spam the false alarm);</li>
-     *   <li>at least one of {@code outOfScopeTestDirs} /
-     *       {@code outOfScopeSourceDirs} is configured (zero-config
-     *       installs never opted in, so the hint would just be noise);
-     *       </li>
-     *   <li>the out-of-scope bucket is empty (if the config IS biting,
-     *       the bucket count already tells the story).</li>
-     * </ul>
+     * <p>Gate: only {@link Situation#DISCOVERY_SUCCESS} and
+     * {@link Situation#DISCOVERY_EMPTY} can have been influenced by an
+     * out-of-scope pattern. The other four situations reach their
+     * outcome for reasons the out-of-scope bucket cannot change:
+     * {@link Situation#EMPTY_DIFF} (no files to match),
+     * {@link Situation#ALL_FILES_IGNORED} (ignore wins before
+     * out-of-scope ever looks at the file),
+     * {@link Situation#ALL_FILES_OUT_OF_SCOPE} (bucket is non-empty, so
+     * the "silent" precondition is false — also caught by the
+     * bucket-empty guard below), and {@link Situation#UNMAPPED_FILE}
+     * (by construction the file missed every pattern, including
+     * out-of-scope). Firing here trains reviewers to ignore the hint
+     * on routine docs-only / gradle-only MRs — that's the v1.9.17
+     * sanity-test finding this gate exists to close.
+     *
+     * <p>Other preconditions: diff non-empty, at least one of
+     * {@code outOfScopeTestDirs} / {@code outOfScopeSourceDirs}
+     * configured, and the out-of-scope bucket empty.
      */
     static void appendOutOfScopeHint(List<String> lines,
                                      AffectedTestsConfig config,
                                      AffectedTestsResult result) {
+        Situation situation = result.situation();
+        if (situation != Situation.DISCOVERY_SUCCESS
+                && situation != Situation.DISCOVERY_EMPTY) {
+            return;
+        }
         if (result.changedFiles().isEmpty()) {
             return;
         }
