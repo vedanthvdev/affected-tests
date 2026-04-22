@@ -399,6 +399,10 @@ affected-tests/
 - **JavaParser** — Source-level test discovery (usage + implementation strategies)
 - **SLF4J** — Logging
 
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history. GitHub's auto-generated release notes (one entry per tag, backed by the merged PR titles) are on the [Releases page](https://github.com/vedanthvdev/affected-tests/releases).
+
 ## Versioning
 
 Versions are managed automatically via [axion-release](https://github.com/allegro/axion-release-plugin) — derived from git tags, never hardcoded in source.
