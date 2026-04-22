@@ -1,6 +1,7 @@
 package io.affectedtests.gradle;
 
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
+import io.affectedtests.core.AffectedTestsEngine.Buckets;
 import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
 import io.affectedtests.core.config.Action;
 import io.affectedtests.core.config.Situation;
@@ -38,6 +39,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("src/main/java/com/example/Foo.java"),
                 Set.of("com.example.Foo"),
                 Set.of(),
+                Buckets.empty(),
                 false,
                 false,
                 Situation.DISCOVERY_SUCCESS,
@@ -63,6 +65,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("src/main/resources/application.yml"),
                 Set.of(),
                 Set.of(),
+                Buckets.empty(),
                 true,
                 false,
                 Situation.UNMAPPED_FILE,
@@ -92,6 +95,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(),
                 Set.of(),
                 Set.of(),
+                Buckets.empty(),
                 true,
                 false,
                 Situation.EMPTY_DIFF,
@@ -117,6 +121,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("src/main/java/com/example/Orphan.java"),
                 Set.of("com.example.Orphan"),
                 Set.of(),
+                Buckets.empty(),
                 true,
                 false,
                 Situation.DISCOVERY_EMPTY,
@@ -138,6 +143,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(), Map.of(),
                 Set.of("src/main/resources/application.yml"),
                 Set.of(), Set.of(),
+                Buckets.empty(),
                 true, false,
                 Situation.UNMAPPED_FILE, Action.FULL_SUITE,
                 EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
@@ -147,6 +153,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("src/main/java/com/example/Foo.java"),
                 Set.of("com.example.Foo"),
                 Set.of(),
+                Buckets.empty(),
                 false, false,
                 Situation.DISCOVERY_SUCCESS, Action.SELECTED,
                 EscalationReason.NONE);
@@ -176,6 +183,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(), Map.of(),
                 Set.of("src/main/resources/application.yml"),
                 Set.of(), Set.of(),
+                Buckets.empty(),
                 true, false,
                 Situation.UNMAPPED_FILE, Action.FULL_SUITE,
                 EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
@@ -185,6 +193,7 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("src/main/java/com/example/Foo.java"),
                 Set.of("com.example.Foo"),
                 Set.of(),
+                Buckets.empty(),
                 false, false,
                 Situation.DISCOVERY_SUCCESS, Action.SELECTED,
                 EscalationReason.NONE);
