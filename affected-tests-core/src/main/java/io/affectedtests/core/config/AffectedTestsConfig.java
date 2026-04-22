@@ -464,8 +464,16 @@ public final class AffectedTestsConfig {
         );
 
         private String baseRef = "origin/master";
-        private boolean includeUncommitted = true;
-        private boolean includeStaged = true;
+        // Committed-only by default: the plugin's question is "what
+        // tests does *this commit* touch?", not "what tests does this
+        // commit plus whatever is rattling around in your working
+        // tree touch?". Matching the default to that framing means a
+        // programmatic or Gradle invocation on the same HEAD picks the
+        // same tests every time, independent of dev workstation state,
+        // and lines up with how CI checks the tree out. Callers who
+        // want WIP to expand the diff opt in via {@code includeUncommitted(true)}.
+        private boolean includeUncommitted = false;
+        private boolean includeStaged = false;
         private Boolean runAllIfNoMatches;
         private Boolean runAllOnNonJavaChange;
         private Set<String> strategies = Set.of(STRATEGY_NAMING, STRATEGY_USAGE, STRATEGY_IMPL, STRATEGY_TRANSITIVE);

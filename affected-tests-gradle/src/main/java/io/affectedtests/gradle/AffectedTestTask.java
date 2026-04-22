@@ -71,7 +71,11 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Whether to include uncommitted (unstaged) changes in the diff.
-     * Default: {@code true}.
+     * Default: {@code false} — committed-only, so a local run picks
+     * the same tests CI would pick on the same HEAD, and two runs on
+     * the same commit are deterministic. Flip to {@code true} in
+     * {@code build.gradle} if you iterate on tests locally and want
+     * WIP to seed the diff.
      *
      * @return the include uncommitted property
      */
@@ -80,7 +84,8 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Whether to include staged (added to index) changes in the diff.
-     * Default: {@code true}.
+     * Default: {@code false} — see {@link #getIncludeUncommitted()} for
+     * the rationale; both knobs move together on the CI-first defaults.
      *
      * @return the include staged property
      */

@@ -26,8 +26,16 @@ public class AffectedTestsPlugin implements Plugin<Project> {
                 project.getProviders().gradleProperty("affectedTestsBaseRef")
                         .orElse("origin/master")
         );
-        extension.getIncludeUncommitted().convention(true);
-        extension.getIncludeStaged().convention(true);
+        // COMMITTED-ONLY by default: the plugin's whole job is "what
+        // tests does this MR touch?", and the MR is the committed diff
+        // — not the dev's WIP. Matching this default to the CI reality
+        // means a local `./gradlew affectedTest` run picks the same
+        // tests CI will run on the same HEAD, and two runs on the same
+        // commit are deterministic. Adopters who iterate on WIP tests
+        // flip these back to `true` in their build.gradle; the plugin
+        // never silently expands the diff boundary.
+        extension.getIncludeUncommitted().convention(false);
+        extension.getIncludeStaged().convention(false);
         // No conventions for the two legacy booleans — leaving them
         // unset is the v2 signal that the caller has not overridden the
         // defaults, which lets the core config resolver apply

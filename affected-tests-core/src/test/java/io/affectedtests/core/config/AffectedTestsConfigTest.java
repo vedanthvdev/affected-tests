@@ -14,8 +14,15 @@ class AffectedTestsConfigTest {
         AffectedTestsConfig config = AffectedTestsConfig.builder().build();
 
         assertEquals("origin/master", config.baseRef());
-        assertTrue(config.includeUncommitted());
-        assertTrue(config.includeStaged());
+        // v1.10.x flip: the core builder now defaults to COMMITTED-ONLY
+        // (both flags false). Rationale lives in the release notes and
+        // AffectedTestsPlugin#apply — picking CI semantics as the
+        // default, with WIP inclusion as an explicit opt-in, keeps a
+        // programmatic run on the same HEAD deterministic.
+        assertFalse(config.includeUncommitted(),
+                "Core builder default must be COMMITTED-ONLY as of the v1.9.14 → next-release flip");
+        assertFalse(config.includeStaged(),
+                "Core builder default must be COMMITTED-ONLY as of the v1.9.14 → next-release flip");
         // Pre-v2 legacy defaults preserved 1:1 for zero-config callers —
         // the getters below read the raw configured value (or the
         // hardcoded pre-v2 default when unset), not the resolved
