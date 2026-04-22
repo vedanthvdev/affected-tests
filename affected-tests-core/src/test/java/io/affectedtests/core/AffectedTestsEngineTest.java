@@ -1,7 +1,10 @@
 package io.affectedtests.core;
 
 import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
+import io.affectedtests.core.config.Action;
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.config.Mode;
+import io.affectedtests.core.config.Situation;
 import org.eclipse.jgit.api.Git;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -377,6 +380,103 @@ class AffectedTestsEngineTest {
             assertTrue(result.testClassFqns().isEmpty());
             assertEquals(EscalationReason.NONE, result.escalationReason(),
                     "Opting out of the non-Java escalation must also clear its reason tag");
+        }
+    }
+
+    @Test
+    void apiTestOnlyDiffRoutesToOutOfScopeAndSkips() throws Exception {
+        // Canonical v2 scenario: a Cucumber/api-test-only diff must
+        // short-circuit to SKIPPED without dragging the unit-test
+        // dispatcher into a full-suite run.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Path apiTestDir = tempDir.resolve("api-test/src/test/java/com/example/api");
+            Files.createDirectories(apiTestDir);
+            Files.writeString(apiTestDir.resolve("FooSteps.java"),
+                    "package com.example.api;\npublic class FooSteps {}");
+
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("api-test only").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .outOfScopeTestDirs(java.util.List.of("api-test/src/test/java"))
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.ALL_FILES_OUT_OF_SCOPE, result.situation());
+            assertEquals(Action.SKIPPED, result.action());
+            assertTrue(result.skipped());
+            assertFalse(result.runAll());
+            assertTrue(result.testClassFqns().isEmpty());
+            assertEquals(EscalationReason.NONE, result.escalationReason());
+        }
+    }
+
+    @Test
+    void markdownOnlyDiffRoutesToAllFilesIgnoredAndSkips() throws Exception {
+        // Markdown is in the default ignore list — a docs-only diff must
+        // land on ALL_FILES_IGNORED and skip tests, not fall through to
+        // the unmapped-file safety net.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Files.writeString(tempDir.resolve("docs.md"), "# docs");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("docs only").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.ALL_FILES_IGNORED, result.situation());
+            assertEquals(Action.SKIPPED, result.action());
+            assertTrue(result.skipped());
+            assertFalse(result.runAll());
+        }
+    }
+
+    @Test
+    void modeCiEscalatesDiscoveryEmpty() throws Exception {
+        // Mode.CI's DISCOVERY_EMPTY default is FULL_SUITE — a CI user who
+        // opts into mode=CI without also setting the legacy boolean still
+        // gets the full-suite safety net on "found nothing" diffs.
+        try (Git git = initRepoWithInitialCommit()) {
+            String base = git.log().call().iterator().next().getName();
+
+            Path prodDir = tempDir.resolve("src/main/java/com/example");
+            Files.createDirectories(prodDir);
+            Files.writeString(prodDir.resolve("Orphan.java"),
+                    "package com.example;\npublic class Orphan {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("orphan").call();
+
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef(base)
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .mode(Mode.CI)
+                    .transitiveDepth(0)
+                    .build();
+
+            AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
+            AffectedTestsEngine.AffectedTestsResult result = engine.run();
+
+            assertEquals(Situation.DISCOVERY_EMPTY, result.situation());
+            assertEquals(Action.FULL_SUITE, result.action());
+            assertTrue(result.runAll());
+            assertFalse(result.skipped());
+            assertEquals(EscalationReason.RUN_ALL_IF_NO_MATCHES, result.escalationReason());
         }
     }
 

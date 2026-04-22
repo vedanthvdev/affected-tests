@@ -1,6 +1,8 @@
 package io.affectedtests.core;
 
+import io.affectedtests.core.config.Action;
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.config.Situation;
 import io.affectedtests.core.discovery.*;
 import io.affectedtests.core.git.GitChangeDetector;
 import io.affectedtests.core.mapping.PathToClassMapper;
@@ -14,17 +16,22 @@ import java.util.*;
 /**
  * Main orchestrator: detects changes, maps them to classes, discovers affected tests.
  *
- * <p>Pipeline:
+ * <p>Pipeline (v2 situation-based):
  * <ol>
  *   <li>Detect changed files via JGit ({@code baseRef..HEAD} + uncommitted/staged)</li>
- *   <li>Map file paths to production and test class FQNs</li>
- *   <li>Run all enabled discovery strategies (naming, usage, impl, transitive)
- *       and merge their results. Scanning is recursive — modules at any nesting
- *       depth are discovered automatically.</li>
+ *   <li>Map file paths into five mutually-exclusive buckets: ignored,
+ *       out-of-scope, production, test, unmapped</li>
+ *   <li>Pick the {@link Situation} for the diff (see evaluation order in the
+ *       {@link Situation} javadoc). {@link Situation#EMPTY_DIFF} short-circuits
+ *       before any discovery runs.</li>
+ *   <li>For "ambiguous" situations (empty diff, all-ignored, all-out-of-scope,
+ *       unmapped) the {@link Action} from {@link AffectedTestsConfig#actionFor}
+ *       is applied directly — no discovery.</li>
+ *   <li>Otherwise run all enabled discovery strategies (naming, usage, impl,
+ *       transitive) and merge their results, then route through
+ *       {@link Situation#DISCOVERY_EMPTY} or {@link Situation#DISCOVERY_SUCCESS}.</li>
  *   <li>Filter the union against test classes that actually exist on disk so
  *       deleted/renamed tests don't reach the downstream {@code test} task</li>
- *   <li>Return the filtered FQN set together with the file path of each test,
- *       so callers can route per-module test invocations correctly</li>
  * </ol>
  */
 public final class AffectedTestsEngine {
@@ -41,10 +48,10 @@ public final class AffectedTestsEngine {
 
     /**
      * Why a result flipped to {@code runAll = true}, or {@link #NONE} when no
-     * escalation occurred. Callers (notably the Gradle task) use this to log
-     * an accurate trigger name — without it, any escalation would have to be
-     * attributed to a single hard-coded flag, which misleads users once
-     * multiple escalation paths exist.
+     * escalation occurred. Preserved as a v1 back-compat surface so that
+     * existing Gradle-task callers keep receiving the same reason codes —
+     * the v2 engine now records a richer {@link Situation}/{@link Action}
+     * pair internally and derives the legacy code from them.
      */
     public enum EscalationReason {
         /** No escalation — either a filtered selection or a plain "nothing to do" result. */
@@ -52,37 +59,65 @@ public final class AffectedTestsEngine {
         /**
          * Git produced an empty change set (no files differ between
          * {@code baseRef} and the working tree) and {@code runAllIfNoMatches}
-         * was true. Distinct from {@link #RUN_ALL_IF_NO_MATCHES} because
-         * discovery never actually ran, and the lifecycle log must say so
-         * rather than claim "no affected tests discovered".
+         * was true. Derived from {@link Situation#EMPTY_DIFF} +
+         * {@link Action#FULL_SUITE}.
          */
         RUN_ALL_ON_EMPTY_CHANGESET,
-        /** Discovery completed, returned an empty test set, and {@code runAllIfNoMatches} was true. */
+        /**
+         * Discovery completed, returned an empty test set, and the action
+         * for {@link Situation#DISCOVERY_EMPTY} resolved to
+         * {@link Action#FULL_SUITE}.
+         */
         RUN_ALL_IF_NO_MATCHES,
         /**
          * The change set contained at least one file the mapper could not
          * resolve to a Java class under the configured source/test
-         * directories (e.g. {@code application.yml}, {@code build.gradle}),
-         * and {@code runAllOnNonJavaChange} was true.
+         * directories, and the action for {@link Situation#UNMAPPED_FILE}
+         * resolved to {@link Action#FULL_SUITE}.
          */
-        RUN_ALL_ON_NON_JAVA_CHANGE
+        RUN_ALL_ON_NON_JAVA_CHANGE,
+        /**
+         * Every file in the diff matched {@link AffectedTestsConfig#ignorePaths()}
+         * and the action for {@link Situation#ALL_FILES_IGNORED} resolved
+         * to {@link Action#FULL_SUITE}. v2-only — no legacy boolean
+         * produces this code.
+         */
+        RUN_ALL_ON_ALL_FILES_IGNORED,
+        /**
+         * Every file in the diff sat under
+         * {@link AffectedTestsConfig#outOfScopeTestDirs()} or
+         * {@link AffectedTestsConfig#outOfScopeSourceDirs()} and the
+         * action for {@link Situation#ALL_FILES_OUT_OF_SCOPE} resolved to
+         * {@link Action#FULL_SUITE}. v2-only.
+         */
+        RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE
     }
 
     /**
      * Result of the affected tests analysis.
      *
      * @param testClassFqns            FQNs of tests that should be executed
+     *                                 (empty when {@link #runAll} or
+     *                                 {@link #skipped} is true).
      * @param testFqnToPath            map of test FQN to its absolute file path on
      *                                 disk (used by callers to route invocations
      *                                 to the correct subproject). Empty when
-     *                                 {@link #runAll} is {@code true}.
+     *                                 {@link #runAll} or {@link #skipped} is
+     *                                 {@code true}.
      * @param changedFiles             raw changed file paths from git
      * @param changedProductionClasses production FQNs detected in the diff
      * @param changedTestClasses       test FQNs detected directly in the diff
      *                                 (may include FQNs whose files were deleted)
      * @param runAll                   whether the caller should run the full suite
-     * @param escalationReason         tag describing why {@code runAll} flipped,
-     *                                 or {@link EscalationReason#NONE} when it did not
+     * @param skipped                  whether the caller should run no tests at all
+     *                                 (v2 — previously impossible to express)
+     * @param situation                which decision branch the engine landed on
+     * @param action                   the resolved {@link Action} for
+     *                                 {@link #situation}; one of SELECTED,
+     *                                 FULL_SUITE, SKIPPED
+     * @param escalationReason         legacy reason code kept in sync with
+     *                                 {@link #situation}/{@link #action} for
+     *                                 v1 callers; see {@link EscalationReason}
      */
     public record AffectedTestsResult(
             Set<String> testClassFqns,
@@ -91,11 +126,16 @@ public final class AffectedTestsEngine {
             Set<String> changedProductionClasses,
             Set<String> changedTestClasses,
             boolean runAll,
+            boolean skipped,
+            Situation situation,
+            Action action,
             EscalationReason escalationReason
     ) {}
 
     /**
-     * Runs the full pipeline: detect changes, map to classes, discover tests.
+     * Runs the full pipeline: detect changes, map to classes, pick a
+     * situation, resolve it to an action, and (where relevant) discover
+     * the affected test set.
      */
     public AffectedTestsResult run() {
         log.info("=== Affected Tests Analysis ===");
@@ -103,42 +143,54 @@ public final class AffectedTestsEngine {
         log.info("Base ref: {}", config.baseRef());
         log.info("Strategies: {}", config.strategies());
         log.info("Transitive depth: {}", config.transitiveDepth());
+        log.info("Effective mode: {}", config.effectiveMode());
 
         GitChangeDetector changeDetector = new GitChangeDetector(projectDir, config);
         Set<String> changedFiles = changeDetector.detectChangedFiles();
 
         if (changedFiles.isEmpty()) {
             log.info("No changed files detected.");
-            boolean runAll = config.runAllIfNoMatches();
-            // Distinct reason from the post-discovery empty path: discovery
-            // never ran here, so the task log must not claim "no affected
-            // tests discovered" when in fact nothing was ever looked at.
-            return new AffectedTestsResult(Set.of(), Map.of(), changedFiles, Set.of(), Set.of(),
-                    runAll,
-                    runAll ? EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET : EscalationReason.NONE);
+            return resolveAmbiguous(Situation.EMPTY_DIFF, changedFiles,
+                    Set.of(), Set.of());
         }
 
         PathToClassMapper mapper = new PathToClassMapper(config);
         MappingResult mapping = mapper.mapChangedFiles(changedFiles);
 
-        // Safety escalation: if the caller opted in (default) and any changed
-        // file cannot be mapped to a Java class under the configured source
-        // dirs — typically application.yml, build.gradle, a Liquibase
-        // changelog, a logback config — we refuse to pick a subset. The
-        // motto is "run more, never run less": the filtered set is empty and
-        // runAll is true so the downstream task executes the whole suite.
-        if (config.runAllOnNonJavaChange() && !mapping.unmappedChangedFiles().isEmpty()) {
-            log.warn("Non-Java / unmapped change detected ({} file(s)). Forcing full test suite. Examples: {}",
-                    mapping.unmappedChangedFiles().size(),
+        int diffSize = changedFiles.size();
+        int ignored = mapping.ignoredFiles().size();
+        int outOfScope = mapping.outOfScopeFiles().size();
+
+        // Priority matches the Situation javadoc. Remember that the mapper
+        // already routes each file into at most one bucket, so the "all X"
+        // branches and the "any unmapped" branch are mutually exclusive by
+        // construction. The order here just picks the situation name that
+        // matches the diff's shape.
+        if (ignored == diffSize) {
+            log.info("All {} changed file(s) matched ignorePaths.", diffSize);
+            return resolveAmbiguous(Situation.ALL_FILES_IGNORED, changedFiles,
+                    mapping.productionClasses(), mapping.testClasses());
+        }
+        if (outOfScope == diffSize) {
+            log.info("All {} changed file(s) fell under out-of-scope dirs.", diffSize);
+            return resolveAmbiguous(Situation.ALL_FILES_OUT_OF_SCOPE, changedFiles,
+                    mapping.productionClasses(), mapping.testClasses());
+        }
+        if (!mapping.unmappedChangedFiles().isEmpty()) {
+            Action action = config.actionFor(Situation.UNMAPPED_FILE);
+            log.warn("Non-Java / unmapped change detected ({} file(s)). Action: {}. Examples: {}",
+                    mapping.unmappedChangedFiles().size(), action,
                     mapping.unmappedChangedFiles().stream().limit(5).toList());
-            return new AffectedTestsResult(
-                    Set.of(),
-                    Map.of(),
-                    changedFiles,
-                    mapping.productionClasses(),
-                    mapping.testClasses(),
-                    true,
-                    EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+            // SELECTED here means "ignore the unmapped file, proceed with
+            // discovery on whatever production/test files were in the
+            // diff" — this is the behaviour legacy
+            // {@code runAllOnNonJavaChange=false} callers expect, and the
+            // only way to express it in the v2 model without inventing a
+            // second fallthrough enum value.
+            if (action != Action.SELECTED) {
+                return emptyResult(Situation.UNMAPPED_FILE, action, changedFiles,
+                        mapping.productionClasses(), mapping.testClasses());
+            }
         }
 
         Set<String> candidateTests = new LinkedHashSet<>();
@@ -184,14 +236,11 @@ public final class AffectedTestsEngine {
             }
         }
 
-        boolean runAll = false;
-        EscalationReason reason = EscalationReason.NONE;
-        if (allTestsToRun.isEmpty() && config.runAllIfNoMatches()) {
-            log.warn("No affected tests found but runAllIfNoMatches=true. Running full suite.");
-            runAll = true;
-            reason = EscalationReason.RUN_ALL_IF_NO_MATCHES;
-        } else if (allTestsToRun.isEmpty()) {
-            log.info("No affected tests found. Nothing to run.");
+        if (allTestsToRun.isEmpty()) {
+            Action action = config.actionFor(Situation.DISCOVERY_EMPTY);
+            log.info("Discovery produced no affected tests. Action: {}.", action);
+            return emptyResult(Situation.DISCOVERY_EMPTY, action, changedFiles,
+                    mapping.productionClasses(), mapping.testClasses());
         }
 
         log.info("=== Result: {} affected test classes ===", allTestsToRun.size());
@@ -203,8 +252,76 @@ public final class AffectedTestsEngine {
                 changedFiles,
                 mapping.productionClasses(),
                 mapping.testClasses(),
-                runAll,
-                reason
+                false,
+                false,
+                Situation.DISCOVERY_SUCCESS,
+                Action.SELECTED,
+                EscalationReason.NONE
         );
+    }
+
+    /**
+     * Resolves a situation that short-circuits discovery into an empty
+     * result with the appropriate {@code runAll}/{@code skipped} flags.
+     * Used by every branch except {@link Situation#DISCOVERY_SUCCESS} and
+     * {@link Situation#UNMAPPED_FILE}-with-{@link Action#SELECTED}.
+     *
+     * <p>When {@link Situation#UNMAPPED_FILE} resolves to
+     * {@link Action#SELECTED} the engine deliberately does <em>not</em>
+     * route through here — it continues into discovery so the diff's
+     * Java files still get analysed, matching the pre-v2 behaviour of
+     * {@code runAllOnNonJavaChange=false}.
+     */
+    private AffectedTestsResult resolveAmbiguous(Situation situation,
+                                                 Set<String> changedFiles,
+                                                 Set<String> changedProduction,
+                                                 Set<String> changedTests) {
+        Action action = config.actionFor(situation);
+        if (action == Action.SELECTED) {
+            // The only meaningful way for SELECTED to reach here is
+            // someone explicitly configured {@code onEmptyDiff(SELECTED)}
+            // or similar. In every "ambiguous" branch there is no
+            // selection to run by definition, so SELECTED collapses to
+            // "do nothing, don't claim a full run".
+            log.info("Situation {} → SELECTED with empty selection; running no tests.", situation);
+        }
+        return emptyResult(situation, action, changedFiles, changedProduction, changedTests);
+    }
+
+    private AffectedTestsResult emptyResult(Situation situation, Action action,
+                                            Set<String> changedFiles,
+                                            Set<String> changedProduction,
+                                            Set<String> changedTests) {
+        boolean runAll = action == Action.FULL_SUITE;
+        // SELECTED on an ambiguous branch is treated as "skipped" for the
+        // Gradle task's wiring — there is nothing to dispatch either way —
+        // but the {@link Action} field on the result still reads SELECTED
+        // so {@code --explain} can report honestly.
+        boolean skipped = action == Action.SKIPPED
+                || (action == Action.SELECTED && situation != Situation.DISCOVERY_SUCCESS);
+        return new AffectedTestsResult(
+                Set.of(),
+                Map.of(),
+                changedFiles,
+                changedProduction,
+                changedTests,
+                runAll,
+                skipped,
+                situation,
+                action,
+                legacyReason(situation, action)
+        );
+    }
+
+    private static EscalationReason legacyReason(Situation situation, Action action) {
+        if (action != Action.FULL_SUITE) return EscalationReason.NONE;
+        return switch (situation) {
+            case EMPTY_DIFF -> EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET;
+            case DISCOVERY_EMPTY -> EscalationReason.RUN_ALL_IF_NO_MATCHES;
+            case UNMAPPED_FILE -> EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE;
+            case ALL_FILES_IGNORED -> EscalationReason.RUN_ALL_ON_ALL_FILES_IGNORED;
+            case ALL_FILES_OUT_OF_SCOPE -> EscalationReason.RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE;
+            case DISCOVERY_SUCCESS -> EscalationReason.NONE;
+        };
     }
 }

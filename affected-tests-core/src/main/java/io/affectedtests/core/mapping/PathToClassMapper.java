@@ -12,37 +12,54 @@ import java.util.Set;
 
 /**
  * Maps file paths (from git diff output) to fully-qualified Java class names.
- * Separates production sources from test sources and filters by exclusion patterns.
+ * Separates production sources from test sources, tags files as ignored /
+ * out-of-scope where the config says so, and surfaces everything else as
+ * unmapped.
+ *
+ * <p>The five mutually-exclusive buckets of {@link MappingResult} are what
+ * {@link io.affectedtests.core.AffectedTestsEngine} uses to pick a
+ * {@link io.affectedtests.core.config.Situation}. The mapper MUST NOT drop
+ * a changed file into silence: every input path appears in exactly one
+ * bucket, so the engine can always answer "why did we route to X?" with
+ * one bucket count.
  */
 public final class PathToClassMapper {
 
     private static final Logger log = LoggerFactory.getLogger(PathToClassMapper.class);
 
     private final AffectedTestsConfig config;
-    private final List<PathMatcher> excludeMatchers;
+    private final List<PathMatcher> ignoreMatchers;
 
     public PathToClassMapper(AffectedTestsConfig config) {
         this.config = config;
-        this.excludeMatchers = config.excludePaths().stream()
+        this.ignoreMatchers = config.ignorePaths().stream()
                 .map(p -> FileSystems.getDefault().getPathMatcher("glob:" + p))
                 .toList();
     }
 
     /**
-     * Result of mapping changed files: production classes and test classes.
+     * Result of mapping changed files, split into five mutually-exclusive
+     * buckets so the engine can map any diff to exactly one
+     * {@link io.affectedtests.core.config.Situation}.
      *
-     * <p>{@link #unmappedChangedFiles()} captures paths that a Java-source
-     * walk cannot interpret — typically non-Java files (YAML, build scripts,
-     * Liquibase migrations) but also any {@code .java} file outside the
-     * configured source/test directories. Files matched by
-     * {@link AffectedTestsConfig#excludePaths()} are deliberately omitted so
-     * that explicit opt-outs stay silent.
+     * <p>{@link #ignoredFiles()} captures paths matched by
+     * {@link AffectedTestsConfig#ignorePaths()}. {@link #outOfScopeFiles()}
+     * captures paths that sit under
+     * {@link AffectedTestsConfig#outOfScopeTestDirs()} or
+     * {@link AffectedTestsConfig#outOfScopeSourceDirs()}.
+     * {@link #unmappedChangedFiles()} is the "fallthrough" bucket — any
+     * file that wasn't ignored, out-of-scope, a production Java source or
+     * a test Java source ends up here (YAML, build scripts, Liquibase
+     * migrations, stray {@code .java} files outside the configured source
+     * trees).
      */
     public record MappingResult(
             Set<String> productionClasses,
             Set<String> testClasses,
             Set<String> changedProductionFiles,
             Set<String> changedTestFiles,
+            Set<String> ignoredFiles,
+            Set<String> outOfScopeFiles,
             Set<String> unmappedChangedFiles
     ) {}
 
@@ -57,12 +74,30 @@ public final class PathToClassMapper {
         Set<String> testClasses = new LinkedHashSet<>();
         Set<String> changedProductionFiles = new LinkedHashSet<>();
         Set<String> changedTestFiles = new LinkedHashSet<>();
+        Set<String> ignoredFiles = new LinkedHashSet<>();
+        Set<String> outOfScopeFiles = new LinkedHashSet<>();
         Set<String> unmappedChangedFiles = new LinkedHashSet<>();
 
         for (String filePath : changedFiles) {
-            if (isExcluded(filePath)) {
-                // Explicit opt-out — stay silent and do not treat as unmapped.
-                log.debug("Excluded by pattern: {}", filePath);
+            // Ignore rules are evaluated FIRST: a user's explicit
+            // {@code ignorePaths} entry is a contract that nothing about
+            // the file should influence the engine, including nudging it
+            // into the out-of-scope bucket.
+            if (isIgnored(filePath)) {
+                ignoredFiles.add(filePath);
+                log.debug("Ignored by pattern: {}", filePath);
+                continue;
+            }
+
+            // Out-of-scope dirs are evaluated BEFORE the Java mapper so a
+            // {@code .java} file under {@code api-test/src/test/java} is
+            // not mis-filed as an in-scope test class. Source-dir check is
+            // first because real code is more common in diffs than test
+            // code under an out-of-scope test dir.
+            if (isUnder(filePath, config.outOfScopeSourceDirs())
+                    || isUnder(filePath, config.outOfScopeTestDirs())) {
+                outOfScopeFiles.add(filePath);
+                log.debug("Out-of-scope: {}", filePath);
                 continue;
             }
 
@@ -72,7 +107,6 @@ public final class PathToClassMapper {
                 continue;
             }
 
-            // Check if it's under a test source dir
             String testFqn = tryMapToClass(filePath, config.testDirs());
             if (testFqn != null) {
                 testClasses.add(testFqn);
@@ -81,7 +115,6 @@ public final class PathToClassMapper {
                 continue;
             }
 
-            // Check if it's under a production source dir
             String prodFqn = tryMapToClass(filePath, config.sourceDirs());
             if (prodFqn != null) {
                 productionClasses.add(prodFqn);
@@ -96,11 +129,15 @@ public final class PathToClassMapper {
             unmappedChangedFiles.add(filePath);
         }
 
-        log.info("Mapped {} production classes and {} test classes from {} changed files ({} unmapped)",
-                productionClasses.size(), testClasses.size(), changedFiles.size(), unmappedChangedFiles.size());
+        log.info("Mapped {} production, {} test, {} ignored, {} out-of-scope, {} unmapped "
+                        + "(total {} changed files)",
+                productionClasses.size(), testClasses.size(),
+                ignoredFiles.size(), outOfScopeFiles.size(), unmappedChangedFiles.size(),
+                changedFiles.size());
 
         return new MappingResult(productionClasses, testClasses,
-                changedProductionFiles, changedTestFiles, unmappedChangedFiles);
+                changedProductionFiles, changedTestFiles,
+                ignoredFiles, outOfScopeFiles, unmappedChangedFiles);
     }
 
     /**
@@ -179,12 +216,31 @@ public final class PathToClassMapper {
         return "";
     }
 
-    private boolean isExcluded(String filePath) {
+    private boolean isIgnored(String filePath) {
         java.nio.file.Path path = java.nio.file.Path.of(filePath);
-        for (PathMatcher matcher : excludeMatchers) {
+        for (PathMatcher matcher : ignoreMatchers) {
             if (matcher.matches(path)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * Boundary-aware "is this file under any of the given dirs?" check.
+     * Uses the same normalisation as {@link #tryMapToClass} so
+     * {@code "api-test/src/test/java/..."} matches {@code "api-test/src/test/java"}
+     * but {@code "my-api-test/..."} does not.
+     */
+    private static boolean isUnder(String filePath, List<String> dirs) {
+        if (dirs.isEmpty()) return false;
+        String normalized = filePath.replace('\\', '/');
+        for (String dir : dirs) {
+            if (dir == null || dir.isBlank()) continue;
+            String normalizedDir = dir.replace('\\', '/');
+            if (!normalizedDir.endsWith("/")) normalizedDir += "/";
+            if (normalized.startsWith(normalizedDir)) return true;
+            if (normalized.contains("/" + normalizedDir)) return true;
         }
         return false;
     }

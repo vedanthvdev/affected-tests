@@ -45,8 +45,12 @@ class PathToClassMapperTest {
 
     @Test
     void nonJavaFilesAreRecordedAsUnmapped() {
+        // README.md is deliberately omitted from this test: v2 added
+        // "**}{@code /*.md}" to the default ignore list, so a markdown
+        // file no longer contributes to the unmapped bucket. See
+        // {@link #markdownRoutesToIgnoredBucketOnDefaults} for the
+        // positive-path assertion on that.
         Set<String> changed = Set.of(
-                "README.md",
                 "build.gradle",
                 "src/main/resources/application.yml"
         );
@@ -56,6 +60,50 @@ class PathToClassMapperTest {
         assertTrue(result.testClasses().isEmpty());
         assertEquals(changed, result.unmappedChangedFiles(),
                 "Non-Java files must be surfaced as unmapped so the engine can escalate to runAll");
+    }
+
+    @Test
+    void markdownRoutesToIgnoredBucketOnDefaults() {
+        // v2 default ignorePaths contains "**}{@code /*.md}" so a pure
+        // markdown diff routes through Situation.ALL_FILES_IGNORED rather
+        // than dragging the engine into the unmapped-file safety net.
+        Set<String> changed = Set.of("README.md", "docs/guide.md");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.unmappedChangedFiles().isEmpty(),
+                "Markdown must not feed the unmapped bucket under v2 defaults");
+        assertEquals(changed, result.ignoredFiles(),
+                "Markdown must land in the ignored bucket so the engine can route to ALL_FILES_IGNORED");
+    }
+
+    @Test
+    void outOfScopeTestDirsFileRoutesToOutOfScopeBucket() {
+        // Regression for the api-test use case: a diff that only touches
+        // api-test sources must be surfaced as "out of scope" so the
+        // engine can skip the unit-test dispatch entirely, instead of
+        // trying to map the file as an in-scope test class. The test
+        // directory entries are the on-disk paths the plugin sees
+        // (no trailing slash, one per concrete sibling dir) so mixed
+        // diffs that touch {@code /java} and {@code /resources} both
+        // route to the same bucket.
+        AffectedTestsConfig oosConfig = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(java.util.List.of(
+                        "api-test/src/test/java",
+                        "api-test/src/test/resources"))
+                .build();
+        PathToClassMapper oosMapper = new PathToClassMapper(oosConfig);
+
+        Set<String> changed = Set.of(
+                "api-test/src/test/java/com/example/api/FooSteps.java",
+                "api-test/src/test/resources/feature.feature");
+        MappingResult result = oosMapper.mapChangedFiles(changed);
+
+        assertTrue(result.testClasses().isEmpty(),
+                "Out-of-scope test file must not become an in-scope test class");
+        assertEquals(changed, result.outOfScopeFiles(),
+                "Out-of-scope diff must populate the out-of-scope bucket");
+        assertTrue(result.unmappedChangedFiles().isEmpty(),
+                "An out-of-scope file must not leak into the unmapped bucket");
     }
 
     @Test

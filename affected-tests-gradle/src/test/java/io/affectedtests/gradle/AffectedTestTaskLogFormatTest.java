@@ -2,6 +2,8 @@ package io.affectedtests.gradle;
 
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
 import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
+import io.affectedtests.core.config.Action;
+import io.affectedtests.core.config.Situation;
 import org.junit.jupiter.api.Test;
 import org.slf4j.helpers.MessageFormatter;
 
@@ -37,6 +39,9 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("com.example.Foo"),
                 Set.of(),
                 false,
+                false,
+                Situation.DISCOVERY_SUCCESS,
+                Action.SELECTED,
                 EscalationReason.NONE);
 
         String summary = render(AffectedTestTask.renderSummary(result));
@@ -59,6 +64,9 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(),
                 Set.of(),
                 true,
+                false,
+                Situation.UNMAPPED_FILE,
+                Action.FULL_SUITE,
                 EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
 
         String summary = render(AffectedTestTask.renderSummary(result));
@@ -85,6 +93,9 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(),
                 Set.of(),
                 true,
+                false,
+                Situation.EMPTY_DIFF,
+                Action.FULL_SUITE,
                 EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET);
 
         String summary = render(AffectedTestTask.renderSummary(result));
@@ -107,6 +118,9 @@ class AffectedTestTaskLogFormatTest {
                 Set.of("com.example.Orphan"),
                 Set.of(),
                 true,
+                false,
+                Situation.DISCOVERY_EMPTY,
+                Action.FULL_SUITE,
                 EscalationReason.RUN_ALL_IF_NO_MATCHES);
 
         String summary = render(AffectedTestTask.renderSummary(result));
@@ -124,14 +138,18 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(), Map.of(),
                 Set.of("src/main/resources/application.yml"),
                 Set.of(), Set.of(),
-                true, EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+                true, false,
+                Situation.UNMAPPED_FILE, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
         AffectedTestsResult normal = new AffectedTestsResult(
                 Set.of("com.example.FooTest"),
                 Map.of(),
                 Set.of("src/main/java/com/example/Foo.java"),
                 Set.of("com.example.Foo"),
                 Set.of(),
-                false, EscalationReason.NONE);
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
 
         // Both branches must use the same "file(s)" form; otherwise CI logs
         // drift between `changed file(s)` and `changed files` and a grep for
@@ -158,14 +176,18 @@ class AffectedTestTaskLogFormatTest {
                 Set.of(), Map.of(),
                 Set.of("src/main/resources/application.yml"),
                 Set.of(), Set.of(),
-                true, EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+                true, false,
+                Situation.UNMAPPED_FILE, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
         AffectedTestsResult normal = new AffectedTestsResult(
                 Set.of("com.example.FooTest"),
                 Map.of(),
                 Set.of("src/main/java/com/example/Foo.java"),
                 Set.of("com.example.Foo"),
                 Set.of(),
-                false, EscalationReason.NONE);
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
 
         AffectedTestTask.LogLine escalatedLine = AffectedTestTask.renderSummary(escalated);
         AffectedTestTask.LogLine normalLine = AffectedTestTask.renderSummary(normal);

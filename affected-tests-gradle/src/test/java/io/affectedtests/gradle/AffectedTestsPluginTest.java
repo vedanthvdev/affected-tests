@@ -37,20 +37,29 @@ class AffectedTestsPluginTest {
         assertEquals("origin/master", ext.getBaseRef().get());
         assertTrue(ext.getIncludeUncommitted().get());
         assertTrue(ext.getIncludeStaged().get());
-        assertFalse(ext.getRunAllIfNoMatches().get());
-        // The "run more, never run less" default: any non-Java or unmapped file
-        // in the diff must escalate to a full suite. Flipping this default
-        // silently would be a material behaviour change, so pin it in a test.
-        assertTrue(ext.getRunAllOnNonJavaChange().get(),
-                "runAllOnNonJavaChange must default to true to preserve the safety escalation");
-        // Defaults: naming, usage, impl, transitive — transitive is gated by the
-        // strategies list (see I9 in the review), not just by transitiveDepth.
+        // v2: no convention for the legacy booleans — leaving them unset
+        // is the signal the core builder uses to fall through to
+        // mode-based defaults. Zero-config users still observe pre-v2
+        // behaviour because the builder's hard-coded fallbacks match the
+        // old convention values 1:1 (see AffectedTestsConfigTest).
+        assertFalse(ext.getRunAllIfNoMatches().isPresent(),
+                "v2 must not install a convention for runAllIfNoMatches; the core config resolver does the translation");
+        assertFalse(ext.getRunAllOnNonJavaChange().isPresent(),
+                "v2 must not install a convention for runAllOnNonJavaChange; the core config resolver does the translation");
         assertEquals(4, ext.getStrategies().get().size());
         assertTrue(ext.getStrategies().get().contains("transitive"));
-        assertEquals(2, ext.getTransitiveDepth().get());
+        // v2 raises the default transitive depth from 2 to 4 — real-world
+        // ctrl -> svc -> repo -> mapper chains sit at 3-4 levels, so 2
+        // silently dropped coverage on zero-config installs.
+        assertEquals(4, ext.getTransitiveDepth().get());
         assertEquals(4, ext.getTestSuffixes().get().size());
         assertTrue(ext.getIncludeImplementationTests().get());
-        assertEquals(1, ext.getImplementationNaming().get().size());
+        // v2 adds the "Default" prefix pattern alongside "Impl" so
+        // DefaultFooService → FooService is also picked up by the
+        // implementation strategy on zero-config installs.
+        assertEquals(2, ext.getImplementationNaming().get().size());
+        assertTrue(ext.getImplementationNaming().get().contains("Impl"));
+        assertTrue(ext.getImplementationNaming().get().contains("Default"));
     }
 
     @Test

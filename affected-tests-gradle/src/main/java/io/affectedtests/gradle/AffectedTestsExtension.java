@@ -118,11 +118,50 @@ public abstract class AffectedTestsExtension {
 
     /**
      * Glob patterns for files to exclude from analysis.
-     * Default: {@code ["&#42;&#42;/generated/&#42;&#42;"]}.
+     * v2 back-compat alias for {@link #getIgnorePaths()}. Default is an
+     * empty Gradle property — when unset, the v2 {@code ignorePaths}
+     * default applies (a broader list than the pre-v2 single-entry
+     * {@code ["**}{@code /generated/**"]} list).
      *
      * @return the exclude paths list property
+     * @deprecated prefer {@link #getIgnorePaths()} in new configs.
      */
+    @Deprecated
     public abstract ListProperty<String> getExcludePaths();
+
+    /**
+     * Glob patterns for files that must never influence test selection —
+     * for purely documentation, build metadata, or generated artifacts.
+     * A diff consisting entirely of ignored paths routes through
+     * {@code Situation.ALL_FILES_IGNORED}.
+     *
+     * <p>When unset, the core {@code AffectedTestsConfig} default list
+     * applies (markdown, generated/, text/licence/changelog, images).
+     *
+     * @return the ignore paths list property
+     */
+    public abstract ListProperty<String> getIgnorePaths();
+
+    /**
+     * Test source directories (e.g. {@code "api-test/src/test/java"})
+     * whose contents the plugin must not dispatch via the
+     * {@code affectedTest} task. A diff entirely under these directories
+     * routes through {@code Situation.ALL_FILES_OUT_OF_SCOPE}. Intended
+     * for Cucumber/api-test, performance, or other non-unit-test source
+     * sets.
+     *
+     * @return the out-of-scope test dirs list property
+     */
+    public abstract ListProperty<String> getOutOfScopeTestDirs();
+
+    /**
+     * Production source directories the plugin must treat as
+     * out-of-scope. A diff entirely under these dirs routes through
+     * {@code Situation.ALL_FILES_OUT_OF_SCOPE}.
+     *
+     * @return the out-of-scope source dirs list property
+     */
+    public abstract ListProperty<String> getOutOfScopeSourceDirs();
 
     /**
      * Include tests for implementations of changed interfaces/base classes.
@@ -133,10 +172,73 @@ public abstract class AffectedTestsExtension {
     public abstract Property<Boolean> getIncludeImplementationTests();
 
     /**
-     * Implementation naming suffixes (e.g. "Impl" matches FooBarImpl for FooBar).
-     * Default: {@code ["Impl"]}.
+     * Implementation naming prefixes/suffixes (e.g. "Impl" matches
+     * {@code FooBarImpl} for {@code FooBar}; "Default" matches
+     * {@code DefaultFooBar} for {@code FooBar}).
+     * Default: {@code ["Impl", "Default"]}.
      *
      * @return the implementation naming list property
      */
     public abstract ListProperty<String> getImplementationNaming();
+
+    /**
+     * Execution profile ({@code "auto"}, {@code "local"}, {@code "ci"},
+     * or {@code "strict"}). Controls per-situation default actions
+     * when neither the explicit {@code onXxx} setting nor the legacy
+     * boolean translation has picked one.
+     *
+     * <p>Default: unset — which preserves the pre-v2 defaults for
+     * zero-config users. Setting it to {@code "auto"} is the
+     * recommended migration: it detects CI via common env vars and
+     * picks the CI defaults there, and the LOCAL defaults otherwise.
+     *
+     * @return the mode property
+     */
+    public abstract Property<String> getMode();
+
+    /**
+     * Action to take on an empty git diff. One of {@code "selected"},
+     * {@code "full_suite"}, {@code "skipped"} (case-insensitive).
+     *
+     * @return the on-empty-diff property
+     */
+    public abstract Property<String> getOnEmptyDiff();
+
+    /**
+     * Action to take when every file in the diff matched
+     * {@link #getIgnorePaths()}. One of {@code "selected"},
+     * {@code "full_suite"}, {@code "skipped"}.
+     *
+     * @return the on-all-files-ignored property
+     */
+    public abstract Property<String> getOnAllFilesIgnored();
+
+    /**
+     * Action to take when every file in the diff sat under
+     * {@link #getOutOfScopeTestDirs()} or {@link #getOutOfScopeSourceDirs()}.
+     * One of {@code "selected"}, {@code "full_suite"}, {@code "skipped"}.
+     *
+     * @return the on-all-files-out-of-scope property
+     */
+    public abstract Property<String> getOnAllFilesOutOfScope();
+
+    /**
+     * Action to take when the diff contains at least one unmapped file
+     * (non-Java, outside configured source/test dirs). One of
+     * {@code "selected"}, {@code "full_suite"}, {@code "skipped"}. When
+     * set to {@code "selected"} the engine treats the unmapped file as
+     * if it weren't there and continues to discovery — matching
+     * pre-v2 {@code runAllOnNonJavaChange=false} behaviour.
+     *
+     * @return the on-unmapped-file property
+     */
+    public abstract Property<String> getOnUnmappedFile();
+
+    /**
+     * Action to take when discovery completes but returns no tests. One
+     * of {@code "selected"}, {@code "full_suite"}, {@code "skipped"}.
+     *
+     * @return the on-discovery-empty property
+     */
+    public abstract Property<String> getOnDiscoveryEmpty();
 }

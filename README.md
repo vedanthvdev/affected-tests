@@ -24,10 +24,12 @@ plugins {
 ```
 
 That's it. With zero config, the plugin will:
-- Diff against `origin/master`
-- Include uncommitted and staged changes
-- Use naming, usage, implementation, and transitive strategies to discover affected tests
-- Follow 2 levels of transitive dependencies
+
+- Diff against `origin/master` (including uncommitted + staged changes).
+- Route each changed file through one of five buckets: **ignored** (`*.md`, LICENSE, CHANGELOG, images, `**/generated/**`), **out-of-scope**, **production `.java`**, **test `.java`**, or **unmapped** (everything else, e.g. `application.yml`).
+- Pick a discovery strategy — **naming**, **usage**, **impl**, **transitive** — and merge their results into one test set.
+- Follow 4 levels of transitive dependencies (tuned for typical controller → service → repository chains).
+- Fall through to the full suite if it encounters an unmapped file, so a YAML/Gradle/Liquibase diff never ships without tests.
 
 ## CI Integration
 
@@ -45,9 +47,47 @@ That's it. With zero config, the plugin will:
 
 > Make sure to use `fetch-depth: 0` so `git diff` has access to the full history.
 
+## The v2 decision model
+
+Every invocation resolves to exactly one **Situation** and exactly one **Action**, both of which appear in the log line so an operator can tell — at a glance — why the plugin chose what it did.
+
+### Situations (what the engine saw)
+
+| Situation | Fires when |
+|---|---|
+| `EMPTY_DIFF` | `git diff` produced no files at all. |
+| `ALL_FILES_IGNORED` | Every file in the diff matched `ignorePaths` (e.g. a docs-only MR). |
+| `ALL_FILES_OUT_OF_SCOPE` | Every file sat under `outOfScopeTestDirs` or `outOfScopeSourceDirs` (e.g. a Cucumber/api-test-only MR). |
+| `UNMAPPED_FILE` | The diff contains at least one file the plugin cannot resolve to a Java class under `sourceDirs`/`testDirs` (e.g. `application.yml`, `build.gradle`, a Liquibase changelog). |
+| `DISCOVERY_EMPTY` | Mapping succeeded but the discovery strategies returned zero tests. |
+| `DISCOVERY_SUCCESS` | Mapping + discovery produced a non-empty test set. |
+
+### Actions (what the engine will do)
+
+| Action | Meaning |
+|---|---|
+| `SELECTED` | Run only the discovered affected tests. |
+| `FULL_SUITE` | Run the entire test suite (no `--tests` filter). |
+| `SKIPPED` | Exit 0 without running tests. |
+
+Every situation gets an independently-configurable action. The matrix is resolved in strict priority order: **explicit `onXxx`** setting → **legacy boolean** (`runAllIfNoMatches` / `runAllOnNonJavaChange`) → **`mode` profile default** → **pre-v2 hardcoded default**. So nothing you configure today silently regresses tomorrow.
+
+### Mode profiles
+
+`mode` seeds the defaults for situations you haven't explicitly configured:
+
+| Mode | `EMPTY_DIFF` | `ALL_FILES_IGNORED` | `ALL_FILES_OUT_OF_SCOPE` | `UNMAPPED_FILE` | `DISCOVERY_EMPTY` |
+|---|---|---|---|---|---|
+| `local` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | SKIPPED |
+| `ci` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | **FULL_SUITE** |
+| `strict` | FULL_SUITE | FULL_SUITE | SKIPPED | FULL_SUITE | FULL_SUITE |
+| `auto` | Detects `CI` / `GITHUB_ACTIONS` / `GITLAB_CI` / `JENKINS_HOME` and resolves to `ci` or `local`. |
+
+Leaving `mode` unset keeps the pre-v2 zero-config behaviour (same as `local` plus the legacy `runAllOnNonJavaChange=true` safety net).
+
 ## Configuration
 
-All settings have sensible defaults. Override only what you need:
+All settings have sensible defaults. Override only what you need.
 
 ```groovy
 affectedTests {
@@ -58,29 +98,62 @@ affectedTests {
     includeUncommitted = true
     includeStaged = true
 
-    // Run the full suite whenever there is nothing specific to run — either
-    // because the diff produced no changed files at all OR because discovery
-    // ran and returned an empty set. The two branches produce distinct
-    // escalation reasons in the CI log so an operator can tell them apart.
-    // Default: false (skip tests silently in both cases).
+    // v2 profile. "auto" is the recommended migration target.
+    // See the "Mode profiles" table above.
+    // (default: unset — preserves pre-v2 defaults)
+    mode = "auto"
+
+    // ---------------- Path buckets (v2) ----------------
+
+    // Files that must not influence test selection (docs, LICENSE,
+    // CHANGELOG, images, generated sources). When every file in the
+    // diff matches ignorePaths, the engine lands on ALL_FILES_IGNORED.
+    // The defaults already cover markdown/text/LICENSE/CHANGELOG/images
+    // at both the repo root and nested paths — you usually only extend this.
+    ignorePaths = ["**/*Dto.java"]
+
+    // Test source sets the plugin must not dispatch via the affectedTest
+    // task (e.g. Cucumber, Gatling). A diff entirely under these dirs
+    // routes to ALL_FILES_OUT_OF_SCOPE → SKIPPED by default.
+    outOfScopeTestDirs = ["api-test/src/test/java", "api-test/src/test/resources"]
+
+    // Production source sets the plugin must treat as out-of-scope.
+    outOfScopeSourceDirs = []
+
+    // Back-compat alias for ignorePaths. Still honoured so existing
+    // configs keep working. (default: [])
+    // excludePaths = ["**/generated/**"]
+
+    // ---------------- Per-situation actions (v2) ----------------
+
+    // Each takes one of "selected" | "full_suite" | "skipped".
+    // Any value left unset falls back through mode → pre-v2 default.
+    onEmptyDiff            = "skipped"
+    onAllFilesIgnored      = "skipped"
+    onAllFilesOutOfScope   = "skipped"
+    onUnmappedFile         = "full_suite"  // the key MR-safety knob
+    onDiscoveryEmpty       = "full_suite"  // belt-and-braces for CI
+
+    // ---------------- Legacy booleans (still supported) ----------------
+
+    // Translated into onEmptyDiff + onDiscoveryEmpty at build() time.
+    // (default: false)
     runAllIfNoMatches = false
 
-    // Force a full run when the diff contains any file we cannot resolve to
-    // a Java class under sourceDirs/testDirs. This covers both non-Java
-    // resources (application.yml, build.gradle, Liquibase changelogs,
-    // logback config) AND stray .java files living outside the configured
-    // source/test dirs (e.g. buildSrc sources when buildSrc is not in
-    // sourceDirs). Excluded paths are honoured and do not trigger the
-    // escalation. This is independent of runAllIfNoMatches — the two
-    // safety nets fire on different conditions. Default: true.
+    // Translated into onUnmappedFile at build() time.
+    // (default: true — "run more, never run less")
     runAllOnNonJavaChange = true
+
+    // ---------------- Discovery tuning ----------------
 
     // Discovery strategies: "naming", "usage", "impl", "transitive" (default: all four)
     strategies = ["naming", "usage", "impl", "transitive"]
 
-    // Transitive dependency depth — used when the "transitive" strategy is enabled
-    // (default: 2, max: 5, 0 = disabled)
-    transitiveDepth = 2
+    // Transitive dependency depth — used when the "transitive" strategy is enabled.
+    // Raised from 2 → 4 in v2 because typical Spring controller→service→repo
+    // chains are 2–3 deep; 4 gives a margin without producing runaway sets.
+    // (default: 4, max: 5, 0 = disabled)
+    transitiveDepth = 4
 
     // Test class suffixes (default: ["Test", "IT", "ITTest", "IntegrationTest"])
     testSuffixes = ["Test", "IT", "ITTest", "IntegrationTest"]
@@ -91,23 +164,22 @@ affectedTests {
     // Test directories (default: ["src/test/java"])
     testDirs = ["src/test/java"]
 
-    // Exclude patterns (default: ["**/generated/**"])
-    excludePaths = ["**/generated/**", "**/*Dto.java"]
-
     // Include tests for implementations of changed interfaces (default: true)
     includeImplementationTests = true
 
-    // Implementation naming suffixes (default: ["Impl"])
-    implementationNaming = ["Impl"]
+    // Implementation naming prefixes/suffixes — "Impl" matches FooImpl for Foo;
+    // "Default" matches DefaultFoo for Foo, which is idiomatic in Spring code.
+    // (default: ["Impl", "Default"])
+    implementationNaming = ["Impl", "Default"]
 }
 ```
 
 ## How It Works
 
-The pipeline is four stages: **detect** what changed, **map** each path to a Java class (or declare it unmappable), **discover** the tests impacted by those classes, and **execute** only that subset — or the full suite if safety rules demand it.
+The pipeline is five stages: **detect** what changed, **bucket** each path (ignored / out-of-scope / production / test / unmapped), **resolve** the `Situation`, **discover** the tests impacted by the in-scope Java classes, and **execute** only that subset — or the full suite, or nothing at all — based on the `Action` the `Situation` maps to.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Affected Tests architecture: git diff feeds PathToClassMapper, which routes Java files into 4 discovery strategies for per-module test dispatch; two safety gates (runAllIfNoMatches on empty changesets or empty discovery, runAllOnNonJavaChange on unmapped files) escalate to a full run" width="100%">
+  <img src="docs/architecture.svg" alt="Affected Tests v2 architecture: git diff feeds PathToClassMapper which buckets each changed file as ignored, out-of-scope, production Java, test Java, or unmapped; the resulting Situation (EMPTY_DIFF, ALL_FILES_IGNORED, ALL_FILES_OUT_OF_SCOPE, UNMAPPED_FILE, DISCOVERY_EMPTY, DISCOVERY_SUCCESS) maps to an Action (SELECTED, FULL_SUITE, SKIPPED) resolved in priority order from explicit onXxx settings, legacy booleans, mode defaults, and pre-v2 hardcoded defaults" width="100%">
 </p>
 
 <sub>Source: [`docs/architecture.mmd`](docs/architecture.mmd) · regenerate with `npx --yes @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/architecture.svg -b transparent`</sub>
@@ -120,14 +192,14 @@ All four strategies run against every changed production class. Their results ar
 |----------|-------------|---------|
 | **naming** | For each changed class `Foo`, looks for test files named `FooTest`, `FooIT`, `FooITTest`, `FooIntegrationTest` (configurable suffixes). Purely file-name based — no parsing required. | `FooService` changed → finds `FooServiceTest`, `FooServiceIT` |
 | **usage** | Parses every test file with JavaParser and checks whether it references any changed class. Uses a two-tier approach: **(1)** direct import match — if the test has `import com.example.FooService;`, it's affected regardless of how it uses the class; **(2)** type-reference scan for wildcard imports (`import com.example.*`) and same-package usage (no import needed). Catches fields, method parameters, return types, constructor calls, generics, and casts. | `BarModel` changed → finds `BarValidatorTest` (imports it), `BazMapperTest` (same package, uses it as field type) |
-| **impl** | When an interface or base class changes, scans all production source files to find classes that `extends` or `implements` the changed type (via AST) and classes following the `*Impl` naming convention. Then re-runs the naming and usage strategies on those implementations. | `FooService` (interface) changed → finds `FooServiceImpl` → finds `FooServiceImplTest` |
-| **transitive** | Builds a reverse dependency map of all production classes: for each class, which other classes depend on it (via field types). When a class changes, walks this "used-by" graph N levels deep (configurable, default 2, max 5) to find consumers. Then runs naming + usage on those consumers. | `BazGateway` changed → `FooService` uses it (depth 1) → finds `FooServiceTest` via naming |
+| **impl** | When an interface or base class changes, scans all production source files to find classes that `extends` or `implements` the changed type (via AST) and classes following the `*Impl` or `Default*` naming convention. Then re-runs the naming and usage strategies on those implementations. | `FooService` (interface) changed → finds `FooServiceImpl` and `DefaultFooService` → finds `FooServiceImplTest` / `DefaultFooServiceTest` |
+| **transitive** | Builds a reverse dependency map of all production classes: for each class, which other classes depend on it (via field types). When a class changes, walks this "used-by" graph N levels deep (configurable, default 4, max 5) to find consumers. Then runs naming + usage on those consumers. | `BazGateway` changed → `FooService` uses it (depth 1) → `OrdersController` uses `FooService` (depth 2) → finds both tests via naming |
 
 ### How scanning works
 
 The plugin scans the project tree **recursively at any depth** to find source and test directories. It is completely project-structure agnostic — it does not assume any particular module layout. Whether your modules are flat (`api/src/test/java`), nested (`services/orders/src/test/java`), or deeply nested (`platform/services/orders/src/test/java`), all test files are discovered.
 
-Directories like `.git`, `build`, `.gradle`, and `node_modules` are automatically skipped during the walk.
+Directories like `.git`, `build`, `.gradle`, and `node_modules` are automatically skipped during the walk. `outOfScopeTestDirs` and `outOfScopeSourceDirs` are additionally filtered at index time so discovery never picks up tests living there.
 
 ### Directly changed tests
 
@@ -146,19 +218,33 @@ Internally, each discovered test FQN is traced back to the Gradle subproject tha
 
 This makes `--tests` filters scope cleanly to their owning module, instead of being applied globally and failing on any subproject that doesn't happen to contain the FQN. Cross-module imports (e.g. a test in `application` that imports a class from `api`) are still detected correctly via the `usage` and `impl` strategies.
 
-## Fallback Behavior
+## Behaviour reference
 
-| Scenario | Default behavior |
-|----------|-----------------|
-| Change set contains only mapped Java sources | Run the filtered set of affected tests |
-| Change set contains any non-Java or unmapped file — YAML, Gradle, Liquibase, logback, **or a `.java` file outside the configured `sourceDirs`/`testDirs`** | **Run the full test suite** (via `runAllOnNonJavaChange = true`) — opt out with `runAllOnNonJavaChange = false` to restore silent skip |
-| No changed files at all | Exit 0 (or run full suite if `runAllIfNoMatches = true`) — reported to CI as `runAllIfNoMatches=true — no changed files detected`, distinct from the "discovery ran and found nothing" case below |
-| No matching tests found after discovery | Exit 0 (or run full suite if `runAllIfNoMatches = true`) — reported to CI as `runAllIfNoMatches=true — no affected tests discovered` |
-| Changed file matches an entry in `excludePaths` | Silently ignored — excluded paths are an explicit opt-out and never trigger the non-Java escalation |
-| Base ref not found | **Fails with clear error** (prevents silent test skipping in CI) |
-| Git not available | **Fails with clear error** |
+Every row below shows the situation the engine resolved, and the action applied with the default configuration (no `mode` set, no explicit `onXxx`).
 
-The `runAllOnNonJavaChange` default follows the "run more, never run less" principle: a change to `application.yml` can alter production behaviour just as surely as a change to a `.java` file, so the plugin cannot safely pick a subset from an empty Java mapping. Projects that prefer the older "silent skip" behaviour can set `runAllOnNonJavaChange = false`.
+| Diff contents | Resolved `Situation` | Default `Action` | Override knob |
+|---|---|---|---|
+| Only mapped production/test `.java` files | `DISCOVERY_SUCCESS` (or `DISCOVERY_EMPTY` if no tests map) | `SELECTED` | discovery tuning |
+| Only files matching `ignorePaths` (docs, LICENSE, CHANGELOG, images, generated) | `ALL_FILES_IGNORED` | `SKIPPED` | `onAllFilesIgnored` or `mode=strict` |
+| Only files under `outOfScopeTestDirs` / `outOfScopeSourceDirs` (e.g. api-test only) | `ALL_FILES_OUT_OF_SCOPE` | `SKIPPED` | `onAllFilesOutOfScope` |
+| Any YAML / Gradle / Liquibase / `.java` outside configured dirs | `UNMAPPED_FILE` | `FULL_SUITE` (via `runAllOnNonJavaChange=true`) | `onUnmappedFile = "selected"` / `runAllOnNonJavaChange = false` |
+| No changed files at all | `EMPTY_DIFF` | `SKIPPED` | `onEmptyDiff = "full_suite"` / `runAllIfNoMatches = true` / `mode = strict` |
+| Mapping succeeds but discovery returns zero tests | `DISCOVERY_EMPTY` | `SKIPPED` — or `FULL_SUITE` if `mode=ci`/`strict` or `runAllIfNoMatches=true` | `onDiscoveryEmpty` / `mode` / `runAllIfNoMatches` |
+| Mixed diff: Java + unmapped file | `UNMAPPED_FILE` (takes precedence) | `FULL_SUITE` | `onUnmappedFile` — set to `"selected"` to fall through to discovery |
+| `baseRef` not resolvable | `FAILED` | Hard error (prevents silent test skipping in CI) | — |
+| Not a git work tree / JGit I/O error | `FAILED` | Hard error | — |
+
+The `onUnmappedFile = "full_suite"` default follows the "run more, never run less" principle: a change to `application.yml` can alter production behaviour just as surely as a change to a `.java` file, so the plugin cannot safely pick a subset from an empty Java mapping.
+
+### Migration from pre-v2
+
+Existing configs keep working. Specifically:
+
+- `runAllIfNoMatches = true` is translated into `onEmptyDiff = FULL_SUITE` **and** `onDiscoveryEmpty = FULL_SUITE` (the pre-v2 behaviour conflated them).
+- `runAllOnNonJavaChange = true` is translated into `onUnmappedFile = FULL_SUITE`.
+- `excludePaths` continues to work as an alias for `ignorePaths`.
+
+The escalation log line names **both** the v2 decision and the legacy flag that would have produced it, so existing grep-based CI dashboards don't break.
 
 ## Project Structure
 
@@ -167,6 +253,7 @@ affected-tests/
 ├── affected-tests-core/          # Git integration, change detection, test discovery
 ├── affected-tests-gradle/        # Gradle plugin (io.github.vedanthvdev.affectedtests)
 ├── docs/
+│   ├── DESIGN-v2.md              # v2 design document (situation/action/mode model)
 │   ├── architecture.mmd          # Mermaid source for the architecture diagram
 │   └── architecture.svg          # Rendered diagram embedded in README
 ├── build.gradle
