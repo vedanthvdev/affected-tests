@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — behaviour flip, read this
+
+- **`includeUncommitted` and `includeStaged` now default to `false`
+  (committed-only).** Previously both defaulted to `true`, meaning a
+  local `./gradlew affectedTest` would expand the diff boundary with
+  whatever happened to be sitting in the dev's working tree. That made
+  local and CI runs of the same HEAD pick different test sets, and the
+  inclusion was invisible in the summary log.
+
+  The new default mirrors CI reality (where the tree is clean after
+  checkout anyway) and makes two runs on the same commit deterministic
+  regardless of workstation state. Adopters who iterate on tests
+  locally and want WIP to seed the diff flip the two knobs back on in
+  `build.gradle`:
+
+  ```groovy
+  affectedTests {
+      includeUncommitted = true  // opt back in for local WIP runs
+      includeStaged = true
+  }
+  ```
+
+  No migration is required for anyone who was already setting these
+  explicitly — the config resolver always preferred the explicit value
+  over the convention. Adopters who relied on the old `true` default
+  without setting anything will see a smaller local-run test set until
+  they commit or opt back in; CI selection is unchanged.
+
 ### Added
 
 - `outOfScopeTestDirs` and `outOfScopeSourceDirs` now accept Ant-style

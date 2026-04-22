@@ -145,9 +145,15 @@ affectedTests {
     // Git base ref to diff against (default: "origin/master")
     baseRef = "origin/main"
 
-    // Include uncommitted/staged changes (default: true)
-    includeUncommitted = true
-    includeStaged = true
+    // Include uncommitted/staged changes (default: false — committed-only).
+    // The plugin ships COMMITTED-ONLY so a local run matches the MR diff
+    // CI will pick up on the same HEAD, and running the task twice in a
+    // row produces the same test selection regardless of workstation state.
+    // Flip to `true` locally when you are iterating on tests and want
+    // WIP to seed the diff. Never enable these in CI — the tree is
+    // already clean after checkout there, so they are pure noise.
+    includeUncommitted = false
+    includeStaged = false
 
     // v2 profile. "auto" is the recommended migration target.
     // See the "Mode profiles" table above.

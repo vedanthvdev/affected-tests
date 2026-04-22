@@ -10,7 +10,11 @@ import org.gradle.api.provider.Property;
  * <pre>{@code
  * affectedTests {
  *     baseRef = "origin/master"
- *     includeUncommitted = true
+ *     // Defaults are COMMITTED-ONLY (both flags default to false) so
+ *     // local runs match CI. Flip to true if you want WIP to seed the
+ *     // diff while iterating on tests locally.
+ *     includeUncommitted = false
+ *     includeStaged = false
  *     // v2: per-situation actions (replaces runAllIfNoMatches / runAllOnNonJavaChange).
  *     // See README.md "Migrating from v1 config" for the full table.
  *     mode = "ci"
@@ -42,7 +46,9 @@ public abstract class AffectedTestsExtension {
 
     /**
      * Include uncommitted (unstaged) changes.
-     * Default: {@code true}.
+     * Default: {@code false} — committed-only semantics match CI. Set
+     * to {@code true} if you iterate on WIP locally and want the
+     * unstaged edits to seed the diff boundary.
      *
      * @return the include uncommitted property
      */
@@ -50,7 +56,8 @@ public abstract class AffectedTestsExtension {
 
     /**
      * Include staged changes.
-     * Default: {@code true}.
+     * Default: {@code false}. See {@link #getIncludeUncommitted()} for
+     * the rationale.
      *
      * @return the include staged property
      */

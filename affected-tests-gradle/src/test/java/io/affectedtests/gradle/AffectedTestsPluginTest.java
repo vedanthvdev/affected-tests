@@ -35,8 +35,16 @@ class AffectedTestsPluginTest {
                 .getByType(AffectedTestsExtension.class);
 
         assertEquals("origin/master", ext.getBaseRef().get());
-        assertTrue(ext.getIncludeUncommitted().get());
-        assertTrue(ext.getIncludeStaged().get());
+        // Default is now COMMITTED-ONLY. Matches CI semantics exactly
+        // (where the tree is already clean after checkout anyway) and
+        // gives local `./gradlew affectedTest` runs the same test
+        // selection the operator's MR will get in CI. Devs who want WIP
+        // to seed the diff opt in explicitly — see CHANGELOG for the
+        // v1.9.14 → next-release behaviour flip.
+        assertFalse(ext.getIncludeUncommitted().get(),
+                "Default must be COMMITTED-ONLY so local runs match CI — WIP inclusion is an explicit opt-in");
+        assertFalse(ext.getIncludeStaged().get(),
+                "Default must be COMMITTED-ONLY so local runs match CI — staged-index inclusion is an explicit opt-in");
         // v2: no convention for the legacy booleans — leaving them unset
         // is the signal the core builder uses to fall through to
         // mode-based defaults. Zero-config users still observe pre-v2
