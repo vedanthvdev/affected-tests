@@ -63,6 +63,7 @@ public final class AffectedTestsConfig {
     private final Mode mode;
     private final Mode effectiveMode;
     private final Map<Situation, Action> situationActions;
+    private final Map<Situation, ActionSource> situationActionSources;
 
     private AffectedTestsConfig(Builder builder) {
         this.baseRef = builder.baseRef;
@@ -110,7 +111,15 @@ public final class AffectedTestsConfig {
         this.runAllOnNonJavaChange =
                 builder.runAllOnNonJavaChange != null ? builder.runAllOnNonJavaChange : true;
 
-        this.situationActions = resolveSituationActions(builder, this.effectiveMode);
+        ResolvedActions resolved = resolveSituationActions(builder, this.effectiveMode);
+        this.situationActions = resolved.actions;
+        this.situationActionSources = resolved.sources;
+    }
+
+    /** Parallel pair returned from the situation-action resolver. */
+    private record ResolvedActions(
+            Map<Situation, Action> actions,
+            Map<Situation, ActionSource> sources) {
     }
 
     /**
@@ -141,7 +150,7 @@ public final class AffectedTestsConfig {
      *       pre-v2 behaviour exactly.</li>
      * </ol>
      */
-    private static Map<Situation, Action> resolveSituationActions(Builder b, Mode effectiveMode) {
+    private static ResolvedActions resolveSituationActions(Builder b, Mode effectiveMode) {
         Action legacyNoMatches = (b.runAllIfNoMatches == null)
                 ? null
                 : (b.runAllIfNoMatches ? Action.FULL_SUITE : Action.SKIPPED);
@@ -154,37 +163,57 @@ public final class AffectedTestsConfig {
                 ? null
                 : (b.runAllOnNonJavaChange ? Action.FULL_SUITE : Action.SELECTED);
 
-        EnumMap<Situation, Action> m = new EnumMap<>(Situation.class);
-        m.put(Situation.EMPTY_DIFF,
-                resolveSituation(Situation.EMPTY_DIFF, b.onEmptyDiff, legacyNoMatches, effectiveMode, Action.SKIPPED));
-        m.put(Situation.ALL_FILES_IGNORED,
-                resolveSituation(Situation.ALL_FILES_IGNORED, b.onAllFilesIgnored, legacyNoMatches, effectiveMode, Action.SKIPPED));
-        m.put(Situation.ALL_FILES_OUT_OF_SCOPE,
-                // No legacy boolean maps to this situation — the "out of
-                // scope" concept did not exist pre-v2, so there is nothing
-                // to translate and the hard-coded fallback is {@code SKIPPED}.
-                resolveSituation(Situation.ALL_FILES_OUT_OF_SCOPE, b.onAllFilesOutOfScope, null, effectiveMode, Action.SKIPPED));
-        m.put(Situation.UNMAPPED_FILE,
-                resolveSituation(Situation.UNMAPPED_FILE, b.onUnmappedFile, legacyNonJava, effectiveMode, Action.FULL_SUITE));
-        m.put(Situation.DISCOVERY_EMPTY,
-                resolveSituation(Situation.DISCOVERY_EMPTY, b.onDiscoveryEmpty, legacyNoMatches, effectiveMode, Action.SKIPPED));
-        // DISCOVERY_SUCCESS is definitionally SELECTED — there is no other
-        // sensible outcome when discovery returns tests. Making it a
-        // configurable action would let users set "discovery ran, found
-        // tests, now run nothing" which is never what anyone wants.
-        m.put(Situation.DISCOVERY_SUCCESS, Action.SELECTED);
-        return Map.copyOf(m);
+        EnumMap<Situation, Action> actions = new EnumMap<>(Situation.class);
+        EnumMap<Situation, ActionSource> sources = new EnumMap<>(Situation.class);
+        resolveInto(actions, sources, Situation.EMPTY_DIFF,
+                b.onEmptyDiff, legacyNoMatches, effectiveMode, Action.SKIPPED);
+        resolveInto(actions, sources, Situation.ALL_FILES_IGNORED,
+                b.onAllFilesIgnored, legacyNoMatches, effectiveMode, Action.SKIPPED);
+        // No legacy boolean maps to ALL_FILES_OUT_OF_SCOPE — the concept
+        // did not exist pre-v2, so there is nothing to translate and the
+        // hard-coded fallback is {@code SKIPPED}.
+        resolveInto(actions, sources, Situation.ALL_FILES_OUT_OF_SCOPE,
+                b.onAllFilesOutOfScope, null, effectiveMode, Action.SKIPPED);
+        resolveInto(actions, sources, Situation.UNMAPPED_FILE,
+                b.onUnmappedFile, legacyNonJava, effectiveMode, Action.FULL_SUITE);
+        resolveInto(actions, sources, Situation.DISCOVERY_EMPTY,
+                b.onDiscoveryEmpty, legacyNoMatches, effectiveMode, Action.SKIPPED);
+        // DISCOVERY_SUCCESS is definitionally SELECTED — there is no
+        // other sensible outcome when discovery returns tests. Making
+        // it configurable would let users set "discovery ran, found
+        // tests, now run nothing", which is never what anyone wants.
+        // It is reported as EXPLICIT in the source map because that's
+        // the honest answer — the code fixes it rather than choosing a
+        // default that someone could override.
+        actions.put(Situation.DISCOVERY_SUCCESS, Action.SELECTED);
+        sources.put(Situation.DISCOVERY_SUCCESS, ActionSource.EXPLICIT);
+        return new ResolvedActions(Map.copyOf(actions), Map.copyOf(sources));
     }
 
-    private static Action resolveSituation(Situation s,
-                                           Action explicit,
-                                           Action legacy,
-                                           Mode effectiveMode,
-                                           Action preV2Default) {
-        if (explicit != null) return explicit;
-        if (legacy != null) return legacy;
-        if (effectiveMode != null) return defaultFor(s, effectiveMode);
-        return preV2Default;
+    private static void resolveInto(EnumMap<Situation, Action> actions,
+                                    EnumMap<Situation, ActionSource> sources,
+                                    Situation s,
+                                    Action explicit,
+                                    Action legacy,
+                                    Mode effectiveMode,
+                                    Action preV2Default) {
+        if (explicit != null) {
+            actions.put(s, explicit);
+            sources.put(s, ActionSource.EXPLICIT);
+            return;
+        }
+        if (legacy != null) {
+            actions.put(s, legacy);
+            sources.put(s, ActionSource.LEGACY_BOOLEAN);
+            return;
+        }
+        if (effectiveMode != null) {
+            actions.put(s, defaultFor(s, effectiveMode));
+            sources.put(s, ActionSource.MODE_DEFAULT);
+            return;
+        }
+        actions.put(s, preV2Default);
+        sources.put(s, ActionSource.HARDCODED_DEFAULT);
     }
 
     /**
@@ -319,6 +348,29 @@ public final class AffectedTestsConfig {
      * @return an immutable situation-to-action map
      */
     public Map<Situation, Action> situationActions() { return situationActions; }
+
+    /**
+     * The {@link ActionSource} that picked the {@link Action} for a given
+     * {@link Situation}. Used by {@code --explain} so operators can tell
+     * whether an outcome came from an explicit setting, a legacy boolean,
+     * a mode default, or the pre-v2 hardcoded baseline.
+     *
+     * @param situation the situation to resolve
+     * @return the source tier that produced {@link #actionFor(Situation)}
+     */
+    public ActionSource actionSourceFor(Situation situation) {
+        return Objects.requireNonNull(situationActionSources.get(situation),
+                "no action source for " + situation);
+    }
+
+    /**
+     * View of the per-situation {@link ActionSource} map. Kept immutable
+     * and aligned with {@link #situationActions()} so consumers can zip
+     * the two for diagnostic output.
+     *
+     * @return an immutable situation-to-source map
+     */
+    public Map<Situation, ActionSource> situationActionSources() { return situationActionSources; }
 
     /** Creates a builder with sensible defaults. */
     public static Builder builder() {

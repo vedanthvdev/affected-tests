@@ -94,6 +94,40 @@ public final class AffectedTestsEngine {
     }
 
     /**
+     * Per-bucket breakdown of the diff as classified by
+     * {@link PathToClassMapper}. Populated on every
+     * {@link AffectedTestsResult} (empty buckets when the engine
+     * short-circuited before mapping, e.g. on {@link Situation#EMPTY_DIFF}).
+     * Carried on the result so {@code --explain} and downstream log
+     * lines can describe "why" without re-running the mapper.
+     *
+     * @param ignoredFiles     files matching {@link AffectedTestsConfig#ignorePaths()}
+     * @param outOfScopeFiles  files under {@link AffectedTestsConfig#outOfScopeTestDirs()}
+     *                         or {@link AffectedTestsConfig#outOfScopeSourceDirs()}
+     * @param productionFiles  {@code .java} files under a configured source dir
+     * @param testFiles        {@code .java} files under a configured test dir
+     * @param unmappedFiles    everything else (yaml, gradle, migrations, stray .java)
+     */
+    public record Buckets(
+            Set<String> ignoredFiles,
+            Set<String> outOfScopeFiles,
+            Set<String> productionFiles,
+            Set<String> testFiles,
+            Set<String> unmappedFiles
+    ) {
+        public static Buckets empty() {
+            return new Buckets(Set.of(), Set.of(), Set.of(), Set.of(), Set.of());
+        }
+
+        /** Total file count across every bucket — always equal to the size of the diff. */
+        public int total() {
+            return ignoredFiles.size() + outOfScopeFiles.size()
+                    + productionFiles.size() + testFiles.size()
+                    + unmappedFiles.size();
+        }
+    }
+
+    /**
      * Result of the affected tests analysis.
      *
      * @param testClassFqns            FQNs of tests that should be executed
@@ -108,6 +142,9 @@ public final class AffectedTestsEngine {
      * @param changedProductionClasses production FQNs detected in the diff
      * @param changedTestClasses       test FQNs detected directly in the diff
      *                                 (may include FQNs whose files were deleted)
+     * @param buckets                  per-bucket diff breakdown from the mapper;
+     *                                 always present (empty buckets on an
+     *                                 empty-diff short-circuit)
      * @param runAll                   whether the caller should run the full suite
      * @param skipped                  whether the caller should run no tests at all
      *                                 (v2 — previously impossible to express)
@@ -125,6 +162,7 @@ public final class AffectedTestsEngine {
             Set<String> changedFiles,
             Set<String> changedProductionClasses,
             Set<String> changedTestClasses,
+            Buckets buckets,
             boolean runAll,
             boolean skipped,
             Situation situation,
@@ -151,11 +189,19 @@ public final class AffectedTestsEngine {
         if (changedFiles.isEmpty()) {
             log.info("No changed files detected.");
             return resolveAmbiguous(Situation.EMPTY_DIFF, changedFiles,
-                    Set.of(), Set.of());
+                    Set.of(), Set.of(), Buckets.empty());
         }
 
         PathToClassMapper mapper = new PathToClassMapper(config);
         MappingResult mapping = mapper.mapChangedFiles(changedFiles);
+
+        Buckets buckets = new Buckets(
+                Set.copyOf(mapping.ignoredFiles()),
+                Set.copyOf(mapping.outOfScopeFiles()),
+                Set.copyOf(mapping.changedProductionFiles()),
+                Set.copyOf(mapping.changedTestFiles()),
+                Set.copyOf(mapping.unmappedChangedFiles())
+        );
 
         int diffSize = changedFiles.size();
         int ignored = mapping.ignoredFiles().size();
@@ -169,12 +215,12 @@ public final class AffectedTestsEngine {
         if (ignored == diffSize) {
             log.info("All {} changed file(s) matched ignorePaths.", diffSize);
             return resolveAmbiguous(Situation.ALL_FILES_IGNORED, changedFiles,
-                    mapping.productionClasses(), mapping.testClasses());
+                    mapping.productionClasses(), mapping.testClasses(), buckets);
         }
         if (outOfScope == diffSize) {
             log.info("All {} changed file(s) fell under out-of-scope dirs.", diffSize);
             return resolveAmbiguous(Situation.ALL_FILES_OUT_OF_SCOPE, changedFiles,
-                    mapping.productionClasses(), mapping.testClasses());
+                    mapping.productionClasses(), mapping.testClasses(), buckets);
         }
         if (!mapping.unmappedChangedFiles().isEmpty()) {
             Action action = config.actionFor(Situation.UNMAPPED_FILE);
@@ -189,7 +235,7 @@ public final class AffectedTestsEngine {
             // second fallthrough enum value.
             if (action != Action.SELECTED) {
                 return emptyResult(Situation.UNMAPPED_FILE, action, changedFiles,
-                        mapping.productionClasses(), mapping.testClasses());
+                        mapping.productionClasses(), mapping.testClasses(), buckets);
             }
         }
 
@@ -240,7 +286,7 @@ public final class AffectedTestsEngine {
             Action action = config.actionFor(Situation.DISCOVERY_EMPTY);
             log.info("Discovery produced no affected tests. Action: {}.", action);
             return emptyResult(Situation.DISCOVERY_EMPTY, action, changedFiles,
-                    mapping.productionClasses(), mapping.testClasses());
+                    mapping.productionClasses(), mapping.testClasses(), buckets);
         }
 
         log.info("=== Result: {} affected test classes ===", allTestsToRun.size());
@@ -252,6 +298,7 @@ public final class AffectedTestsEngine {
                 changedFiles,
                 mapping.productionClasses(),
                 mapping.testClasses(),
+                buckets,
                 false,
                 false,
                 Situation.DISCOVERY_SUCCESS,
@@ -275,7 +322,8 @@ public final class AffectedTestsEngine {
     private AffectedTestsResult resolveAmbiguous(Situation situation,
                                                  Set<String> changedFiles,
                                                  Set<String> changedProduction,
-                                                 Set<String> changedTests) {
+                                                 Set<String> changedTests,
+                                                 Buckets buckets) {
         Action action = config.actionFor(situation);
         if (action == Action.SELECTED) {
             // The only meaningful way for SELECTED to reach here is
@@ -285,13 +333,14 @@ public final class AffectedTestsEngine {
             // "do nothing, don't claim a full run".
             log.info("Situation {} → SELECTED with empty selection; running no tests.", situation);
         }
-        return emptyResult(situation, action, changedFiles, changedProduction, changedTests);
+        return emptyResult(situation, action, changedFiles, changedProduction, changedTests, buckets);
     }
 
     private AffectedTestsResult emptyResult(Situation situation, Action action,
                                             Set<String> changedFiles,
                                             Set<String> changedProduction,
-                                            Set<String> changedTests) {
+                                            Set<String> changedTests,
+                                            Buckets buckets) {
         boolean runAll = action == Action.FULL_SUITE;
         // SELECTED on an ambiguous branch is treated as "skipped" for the
         // Gradle task's wiring — there is nothing to dispatch either way —
@@ -305,6 +354,7 @@ public final class AffectedTestsEngine {
                 changedFiles,
                 changedProduction,
                 changedTests,
+                buckets,
                 runAll,
                 skipped,
                 situation,

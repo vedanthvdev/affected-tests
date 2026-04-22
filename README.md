@@ -23,6 +23,43 @@ plugins {
 ./gradlew affectedTest
 ```
 
+### 3. (Optional) Explain the decision
+
+```bash
+./gradlew affectedTest --explain
+```
+
+Prints the full decision trace — bucket counts, situation, action, and the tier of the priority ladder (explicit / legacy / mode / hardcoded) that picked each action — without running a single test. Useful when a CI run escalated to the full suite and the operator needs to know *why* before filing a bug.
+
+Sample output:
+
+```
+=== Affected Tests — decision trace (--explain) ===
+Base ref:        origin/master
+Mode:            unset (effective: n/a (pre-v2 defaults))
+Changed files:   3
+Buckets:
+  ignored         1
+  out-of-scope    0
+  production .java 1
+  test .java      0
+  unmapped        1
+  ignored sample: README.md
+  production sample: src/main/java/com/example/Foo.java
+  unmapped sample: build.gradle
+Situation:       UNMAPPED_FILE
+Action:          FULL_SUITE (source: pre-v2 hardcoded default)
+Outcome:         FULL_SUITE — runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff
+Action matrix (situation → action [source]):
+  EMPTY_DIFF               SKIPPED [pre-v2 hardcoded default]
+  ALL_FILES_IGNORED        SKIPPED [pre-v2 hardcoded default]
+  ALL_FILES_OUT_OF_SCOPE   SKIPPED [pre-v2 hardcoded default]
+  UNMAPPED_FILE            FULL_SUITE [pre-v2 hardcoded default]
+  DISCOVERY_EMPTY          SKIPPED [pre-v2 hardcoded default]
+  DISCOVERY_SUCCESS        SELECTED [explicit onXxx setting]
+=== end --explain ===
+```
+
 That's it. With zero config, the plugin will:
 
 - Diff against `origin/master` (including uncommitted + staged changes).

@@ -2,8 +2,10 @@ package io.affectedtests.gradle;
 
 import io.affectedtests.core.AffectedTestsEngine;
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
+import io.affectedtests.core.AffectedTestsEngine.Buckets;
 import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
 import io.affectedtests.core.config.Action;
+import io.affectedtests.core.config.ActionSource;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import io.affectedtests.core.config.Mode;
 import io.affectedtests.core.config.Situation;
@@ -16,6 +18,7 @@ import org.gradle.api.provider.Property;
 import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.TaskAction;
+import org.gradle.api.tasks.options.Option;
 import org.gradle.process.ExecOperations;
 import org.gradle.process.ExecResult;
 
@@ -26,9 +29,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Gradle task that detects affected tests and executes them.
@@ -263,6 +268,25 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<String> getOnDiscoveryEmpty();
 
     /**
+     * When {@code true}, the task prints the full decision trace
+     * (buckets, situation, action, action source) and exits without
+     * running any tests. Used by operators to answer "why did this MR
+     * land on that outcome?" without having to enable debug logs.
+     *
+     * <p>Marked {@link Internal @Internal} rather than {@link Input @Input}
+     * because flipping the explain flag must not invalidate a cached
+     * execution — it changes only the lifecycle logging, never the set
+     * of tests Gradle would actually run.
+     *
+     * @return the explain flag property
+     */
+    @Internal
+    @Option(option = "explain",
+            description = "Print the decision trace (buckets, situation, action, source) "
+                    + "and exit without running tests.")
+    public abstract Property<Boolean> getExplain();
+
+    /**
      * Map of subproject directory (relative to the root project, empty string
      * for the root project itself) to the Gradle path of that subproject
      * (e.g. {@code ":services:payment"}). Populated automatically by the plugin
@@ -300,6 +324,19 @@ public abstract class AffectedTestTask extends DefaultTask {
 
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
+
+        boolean explain = getExplain().getOrElse(false);
+        if (explain) {
+            // {@code --explain} is a diagnostic mode: we print the trace and
+            // return without touching the executor so operators can re-run
+            // as many times as they need without waiting for the suite.
+            // Every line goes through {@code lifecycle()} so the trace is
+            // visible by default (no {@code --info} gymnastics).
+            for (String line : renderExplainTrace(config, result)) {
+                getLogger().lifecycle(line);
+            }
+            return;
+        }
 
         // The summary line is the single place the task names the trigger;
         // downstream lines must not repeat the reason or CI logs drift into
@@ -623,6 +660,124 @@ public abstract class AffectedTestTask extends DefaultTask {
      * {@code class(es)}, and {@code class(es)} on both branches so CI
      * greps stay stable across runs with different selection sizes.
      */
+    /** Cap on files listed per bucket in the {@code --explain} trace. */
+    static final int EXPLAIN_SAMPLE_LIMIT = 10;
+
+    /**
+     * Renders the human-readable decision trace produced by
+     * {@code affectedTest --explain}. Returned as a list of lines so the
+     * caller can hand each line to {@link org.gradle.api.logging.Logger#lifecycle(String)}
+     * (no format placeholders — the content is pre-rendered) and so tests
+     * can pin the exact shape without the live logger.
+     *
+     * <p>Every section names the source of the decision so an operator
+     * can see at a glance whether the action came from an explicit
+     * {@code onXxx} setting, a legacy boolean, the mode default table,
+     * or the pre-v2 hardcoded baseline.
+     *
+     * <p>Package-private so {@code AffectedTestTaskExplainFormatTest}
+     * can assert the format without spinning up Gradle.
+     */
+    static List<String> renderExplainTrace(AffectedTestsConfig config, AffectedTestsResult result) {
+        List<String> lines = new ArrayList<>();
+        lines.add("=== Affected Tests — decision trace (--explain) ===");
+        lines.add("Base ref:        " + config.baseRef());
+        String configuredMode = config.mode() == null ? "unset" : config.mode().name();
+        String effectiveMode = config.effectiveMode() == null
+                ? "n/a (pre-v2 defaults)"
+                : config.effectiveMode().name();
+        lines.add("Mode:            " + configuredMode + " (effective: " + effectiveMode + ")");
+        lines.add("Changed files:   " + result.changedFiles().size());
+
+        Buckets buckets = result.buckets();
+        lines.add("Buckets:");
+        lines.add("  ignored         " + buckets.ignoredFiles().size());
+        lines.add("  out-of-scope    " + buckets.outOfScopeFiles().size());
+        lines.add("  production .java " + buckets.productionFiles().size());
+        lines.add("  test .java      " + buckets.testFiles().size());
+        lines.add("  unmapped        " + buckets.unmappedFiles().size());
+
+        appendSample(lines, "ignored",      buckets.ignoredFiles());
+        appendSample(lines, "out-of-scope", buckets.outOfScopeFiles());
+        appendSample(lines, "production",   buckets.productionFiles());
+        appendSample(lines, "test",         buckets.testFiles());
+        appendSample(lines, "unmapped",     buckets.unmappedFiles());
+
+        ActionSource source = config.actionSourceFor(result.situation());
+        lines.add("Situation:       " + result.situation().name());
+        lines.add("Action:          " + result.action().name()
+                + " (source: " + describeSource(source) + ")");
+
+        String outcome;
+        if (result.runAll()) {
+            outcome = "FULL_SUITE — " + describeEscalation(result.escalationReason());
+        } else if (result.skipped()) {
+            outcome = "SKIPPED — no tests will run";
+        } else if (result.action() == Action.SELECTED) {
+            outcome = "SELECTED — " + result.testClassFqns().size()
+                    + " test class(es) will run";
+        } else {
+            outcome = result.action().name();
+        }
+        lines.add("Outcome:         " + outcome);
+
+        // The full action matrix is cheap to print (five rows) and
+        // invaluable for debugging "why did my explicit setting not
+        // win?" — so we always include it, not only on ambiguous
+        // branches. Rows are rendered in a stable order matching the
+        // Situation javadoc's evaluation order so greps/diffs stay
+        // stable across runs.
+        lines.add("Action matrix (situation → action [source]):");
+        for (Situation s : situationOrder()) {
+            ActionSource rowSource = config.actionSourceFor(s);
+            lines.add(String.format(Locale.ROOT, "  %-24s %s [%s]",
+                    s.name(), config.actionFor(s).name(), describeSource(rowSource)));
+        }
+        lines.add("=== end --explain ===");
+        return lines;
+    }
+
+    private static void appendSample(List<String> lines, String label, Set<String> files) {
+        if (files.isEmpty()) {
+            return;
+        }
+        String preview = files.stream()
+                .sorted()
+                .limit(EXPLAIN_SAMPLE_LIMIT)
+                .collect(Collectors.joining(", "));
+        if (files.size() > EXPLAIN_SAMPLE_LIMIT) {
+            preview = preview + ", … (+" + (files.size() - EXPLAIN_SAMPLE_LIMIT) + " more)";
+        }
+        lines.add("  " + label + " sample: " + preview);
+    }
+
+    /**
+     * Situation order used by the explain trace and anywhere else we
+     * render a full per-situation matrix. Matches the evaluation order
+     * documented on {@link Situation} so operators can read the trace
+     * top-to-bottom and mentally simulate the engine without cross-
+     * referencing another doc.
+     */
+    private static List<Situation> situationOrder() {
+        return List.of(
+                Situation.EMPTY_DIFF,
+                Situation.ALL_FILES_IGNORED,
+                Situation.ALL_FILES_OUT_OF_SCOPE,
+                Situation.UNMAPPED_FILE,
+                Situation.DISCOVERY_EMPTY,
+                Situation.DISCOVERY_SUCCESS
+        );
+    }
+
+    private static String describeSource(ActionSource source) {
+        return switch (source) {
+            case EXPLICIT          -> "explicit onXxx setting";
+            case LEGACY_BOOLEAN    -> "legacy boolean (runAllIfNoMatches / runAllOnNonJavaChange)";
+            case MODE_DEFAULT      -> "mode default";
+            case HARDCODED_DEFAULT -> "pre-v2 hardcoded default";
+        };
+    }
+
     static LogLine renderSummary(AffectedTestsResult result) {
         if (result.runAll()) {
             return new LogLine(

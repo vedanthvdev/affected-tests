@@ -157,6 +157,53 @@ class AffectedTestsConfigTest {
     }
 
     @Test
+    void actionSourceReflectsResolutionTierOrdering() {
+        // Zero-config → hardcoded pre-v2 default. This is the baseline
+        // every other tier overrides; pinning it here prevents a future
+        // refactor from silently bumping zero-config users to a mode
+        // default when they never set one.
+        AffectedTestsConfig baseline = AffectedTestsConfig.builder().build();
+        assertEquals(ActionSource.HARDCODED_DEFAULT,
+                baseline.actionSourceFor(Situation.EMPTY_DIFF));
+        assertEquals(ActionSource.HARDCODED_DEFAULT,
+                baseline.actionSourceFor(Situation.UNMAPPED_FILE));
+
+        // Setting mode should flip all unpinned situations to MODE_DEFAULT —
+        // the only escape hatch is an explicit onXxx or a legacy boolean.
+        AffectedTestsConfig modeOnly = AffectedTestsConfig.builder()
+                .mode(Mode.CI)
+                .build();
+        assertEquals(ActionSource.MODE_DEFAULT,
+                modeOnly.actionSourceFor(Situation.DISCOVERY_EMPTY));
+
+        // Legacy boolean must win over mode, or the shim would lie about
+        // what the caller asked for.
+        AffectedTestsConfig legacyOverMode = AffectedTestsConfig.builder()
+                .mode(Mode.STRICT)
+                .runAllIfNoMatches(false)
+                .build();
+        assertEquals(ActionSource.LEGACY_BOOLEAN,
+                legacyOverMode.actionSourceFor(Situation.DISCOVERY_EMPTY));
+
+        // Explicit onXxx must win over both legacy and mode — this is the
+        // only tier that's guaranteed to survive future default changes
+        // and the --explain flag has to be honest about that.
+        AffectedTestsConfig explicitOverEverything = AffectedTestsConfig.builder()
+                .mode(Mode.STRICT)
+                .runAllIfNoMatches(false)
+                .onDiscoveryEmpty(Action.FULL_SUITE)
+                .build();
+        assertEquals(ActionSource.EXPLICIT,
+                explicitOverEverything.actionSourceFor(Situation.DISCOVERY_EMPTY));
+
+        // DISCOVERY_SUCCESS is hardcoded SELECTED regardless of
+        // configuration — that contract is reported as EXPLICIT because
+        // no default can change it.
+        assertEquals(ActionSource.EXPLICIT,
+                baseline.actionSourceFor(Situation.DISCOVERY_SUCCESS));
+    }
+
+    @Test
     void ignorePathsAliasesExcludePaths() {
         AffectedTestsConfig byExclude = AffectedTestsConfig.builder()
                 .excludePaths(List.of("**/*.gen.java"))
