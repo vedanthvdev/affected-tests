@@ -36,7 +36,7 @@ public enum Situation {
     /**
      * Every file in the diff matched {@link AffectedTestsConfig#ignorePaths()}
      * (or the legacy {@code excludePaths} shim). Distinct from
-     * {@link #ALL_OUT_OF_SCOPE} so users can treat "purely docs changes"
+     * {@link #ALL_FILES_OUT_OF_SCOPE} so users can treat "purely docs changes"
      * differently from "purely api-test changes".
      */
     ALL_FILES_IGNORED,

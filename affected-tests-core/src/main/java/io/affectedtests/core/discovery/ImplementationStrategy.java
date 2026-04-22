@@ -105,12 +105,27 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
             simpleNameToFqns.computeIfAbsent(SourceFileScanner.simpleClassName(fqn), k -> new HashSet<>()).add(fqn);
         }
 
-        // 1. Naming convention: look for *Impl classes
-        for (String suffix : config.implementationNaming()) {
-            for (String fqn : changedClasses) {
-                String implSimpleName = SourceFileScanner.simpleClassName(fqn) + suffix;
+        // 1. Naming convention: look for both suffix (*Impl) and prefix
+        // (Default*) derivatives of the changed interface name. The
+        // config list ships with {"Impl", "Default"} and the Builder
+        // javadoc promises both shapes; before this loop checked both
+        // sides, "Default" was appended as a suffix (FooServiceDefault),
+        // which matches nothing real — Spring/Guice code writes
+        // DefaultFooService. The AST branch below rescues the clean
+        // "implements FooService" case, but impls that declare the
+        // super-type via generics only, or files JavaParser could not
+        // parse, were silently missed.
+        Set<String> changedSimpleNames = new HashSet<>();
+        for (String fqn : changedClasses) {
+            changedSimpleNames.add(SourceFileScanner.simpleClassName(fqn));
+        }
+        for (String token : config.implementationNaming()) {
+            for (String changedSimple : changedSimpleNames) {
+                String suffixShape = changedSimple + token;
+                String prefixShape = token + changedSimple;
                 for (String sourceFqn : allSourceFqns) {
-                    if (SourceFileScanner.simpleClassName(sourceFqn).equals(implSimpleName)) {
+                    String sourceSimple = SourceFileScanner.simpleClassName(sourceFqn);
+                    if (sourceSimple.equals(suffixShape) || sourceSimple.equals(prefixShape)) {
                         implementations.add(sourceFqn);
                     }
                 }

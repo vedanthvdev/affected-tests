@@ -33,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -446,18 +447,26 @@ public abstract class AffectedTestTask extends DefaultTask {
         return builder.build();
     }
 
-    private static Mode parseMode(String raw) {
+    // Package-private so AffectedTestTaskLocaleTest can lock in the
+    // Locale.ROOT contract — the Turkish-locale failure this guards
+    // against is not reachable from any Gradle-level test shape, so
+    // direct unit coverage is the only line of defence.
+    static Mode parseMode(String raw) {
         try {
-            return Mode.valueOf(raw.trim().toUpperCase());
+            // Locale.ROOT is mandatory here: Turkish-locale JVMs turn
+            // "ci".toUpperCase() into "Cİ" (U+0130) and the enum lookup
+            // then fails with a misleading "Unknown mode 'ci'" error
+            // even though the spelling is literally in the valid list.
+            return Mode.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             throw new GradleException("Unknown affectedTests.mode '" + raw
                     + "'. Expected one of: auto, local, ci, strict.", e);
         }
     }
 
-    private static Action parseAction(String raw, String property) {
+    static Action parseAction(String raw, String property) {
         try {
-            return Action.valueOf(raw.trim().toUpperCase());
+            return Action.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             throw new GradleException("Unknown " + property + " action '" + raw
                     + "'. Expected one of: selected, full_suite, skipped.", e);
@@ -499,10 +508,35 @@ public abstract class AffectedTestTask extends DefaultTask {
 
                 String taskPath = modulePath.isEmpty() ? "test" : modulePath + ":test";
                 args.add(taskPath);
+                // One module-level lifecycle line; the per-FQN entries
+                // are info-level because they can legitimately run into
+                // the thousands on a widely-used utility change and
+                // spamming lifecycle can blow past CI log-size caps
+                // (GitHub Actions truncates at 4 MiB/step) before the
+                // nested test output even starts.
+                getLogger().lifecycle("  {} ({} test class{})",
+                        taskPath, fqnsForModule.size(), fqnsForModule.size() == 1 ? "" : "es");
                 for (String fqn : fqnsForModule) {
+                    if (!isValidFqn(fqn)) {
+                        // Defence in depth against a compromised source tree
+                        // sneaking shell-like tokens into a --tests argument.
+                        // Gradle's CLI parser currently treats the next argv
+                        // element as the value of --tests regardless of
+                        // content, but that's an undocumented contract and a
+                        // future parser change would turn this into real
+                        // argument injection. Non-Java-shaped FQNs cannot
+                        // correspond to a real JVM test class anyway, so
+                        // dropping them costs nothing and forces the bad
+                        // input to surface visibly.
+                        getLogger().warn(
+                                "Affected Tests: skipping malformed test FQN '{}' for task {} — "
+                                        + "not a Java-shaped identifier, cannot correspond to a "
+                                        + "real test class.", fqn, taskPath);
+                        continue;
+                    }
                     args.add("--tests");
                     args.add(fqn);
-                    getLogger().lifecycle("  {} -> {}", taskPath, fqn);
+                    getLogger().info("  {} -> {}", taskPath, fqn);
                 }
             }
         }
@@ -598,8 +632,30 @@ public abstract class AffectedTestTask extends DefaultTask {
         return isWindows() ? "gradle.bat" : "gradle";
     }
 
+    /**
+     * Java-shaped identifier regex with {@code $} allowed inside names
+     * for inner classes ({@code com.example.Outer$Inner}) and a
+     * {@code .methodName} tail for Gradle's
+     * {@code --tests com.example.Foo.someMethod} syntax. Matches a
+     * strict superset of what a sane Java source file can declare.
+     * Anything outside this shape cannot correspond to a real test
+     * class and is dropped with a warning before reaching the nested
+     * Gradle invocation.
+     */
+    private static final Pattern JAVA_FQN =
+            Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)*");
+
+    static boolean isValidFqn(String fqn) {
+        return fqn != null && !fqn.isEmpty() && JAVA_FQN.matcher(fqn).matches();
+    }
+
     private static boolean isWindows() {
-        return System.getProperty("os.name", "").toLowerCase().contains("win");
+        // Locale.ROOT keeps "Windows" → "windows" on Turkish-locale JVMs;
+        // without it the dotted-i rules turn it into "wındows" and the
+        // contains("win") check misses, routing Windows runners down the
+        // non-Windows branch and picking 'gradlew' / 'gradle' where
+        // 'gradlew.bat' / 'gradle.bat' is required.
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
     /**

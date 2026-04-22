@@ -100,7 +100,9 @@ public abstract class AffectedTestsExtension {
     /**
      * How many levels of transitive dependencies to follow when the
      * {@code transitive} strategy is enabled.
-     * Default: {@code 2}. Range: 0–5.
+     * Default: {@code 4} — matches the depth most Java controller →
+     * service → repository chains actually reach in Modulr-shaped
+     * codebases while leaving one level of margin. Range: 0–5.
      *
      * @return the transitive depth property
      */
