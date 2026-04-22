@@ -107,6 +107,112 @@ class PathToClassMapperTest {
     }
 
     @Test
+    void outOfScopeTestDirsAcceptGlobPattern() {
+        // Users reach for glob patterns (e.g. "api-test/**") as often as
+        // literal prefixes because the `ignorePaths` knob one line above
+        // accepts globs too. The matcher must accept both shapes and fail
+        // closed on patterns it can't interpret, otherwise users silently
+        // lose their out-of-scope safety net while the config file still
+        // looks intentional.
+        AffectedTestsConfig globConfig = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(java.util.List.of("api-test/**"))
+                .build();
+        PathToClassMapper globMapper = new PathToClassMapper(globConfig);
+
+        Set<String> changed = Set.of(
+                "api-test/src/test/java/com/example/api/FooSteps.java",
+                "api-test/src/test/resources/feature.feature");
+        MappingResult result = globMapper.mapChangedFiles(changed);
+
+        assertEquals(changed, result.outOfScopeFiles(),
+                "'api-test/**' glob must route every api-test file to the out-of-scope bucket");
+        assertTrue(result.testClasses().isEmpty());
+        assertTrue(result.unmappedChangedFiles().isEmpty());
+    }
+
+    @Test
+    void outOfScopeTestDirsGlobMatchesNestedModules() {
+        // Real multi-module repos put api-test under a services/ parent,
+        // so the matcher must support a `**/` prefix that crosses any
+        // number of directories — exactly the shape users copy from
+        // Ant/Gradle docs without thinking. A literal-prefix-only
+        // implementation would quietly miss the nested case.
+        AffectedTestsConfig globConfig = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(java.util.List.of("**/api-test/**"))
+                .build();
+        PathToClassMapper globMapper = new PathToClassMapper(globConfig);
+
+        Set<String> changed = Set.of(
+                "services/orders/api-test/src/test/java/com/example/OrderSteps.java");
+        MappingResult result = globMapper.mapChangedFiles(changed);
+
+        assertEquals(changed, result.outOfScopeFiles(),
+                "Nested api-test dir must match the '**/api-test/**' glob");
+    }
+
+    @Test
+    void outOfScopeSourceDirsAcceptGlobPattern() {
+        // Symmetry: whatever shape outOfScopeTestDirs accepts,
+        // outOfScopeSourceDirs must accept too. Users configure both at
+        // the same time for mono-repo setups where a whole module is
+        // carved out of the unit/integration dispatch.
+        AffectedTestsConfig globConfig = AffectedTestsConfig.builder()
+                .outOfScopeSourceDirs(java.util.List.of("legacy-service/**"))
+                .build();
+        PathToClassMapper globMapper = new PathToClassMapper(globConfig);
+
+        Set<String> changed = Set.of(
+                "legacy-service/src/main/java/com/example/LegacyFoo.java");
+        MappingResult result = globMapper.mapChangedFiles(changed);
+
+        assertEquals(changed, result.outOfScopeFiles(),
+                "'legacy-service/**' glob on outOfScopeSourceDirs must route under "
+                        + "legacy-service/ to the out-of-scope bucket");
+        assertTrue(result.productionClasses().isEmpty(),
+                "A file bucketed as out-of-scope must not also be mapped as production");
+    }
+
+    @Test
+    void outOfScopeLiteralPrefixStillWorksAfterGlobSupportAdded() {
+        // Regression guard: the existing literal-prefix shape documented
+        // in the README ("api-test/src/test/java") must keep working.
+        // Losing this would silently break every adopter who migrated to
+        // v2 before glob support existed.
+        AffectedTestsConfig prefixConfig = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(java.util.List.of(
+                        "api-test/src/test/java",
+                        "api-test/src/test/resources"))
+                .build();
+        PathToClassMapper prefixMapper = new PathToClassMapper(prefixConfig);
+
+        Set<String> changed = Set.of(
+                "api-test/src/test/java/com/example/FooSteps.java",
+                "api-test/src/test/resources/feature.feature");
+        MappingResult result = prefixMapper.mapChangedFiles(changed);
+
+        assertEquals(changed, result.outOfScopeFiles());
+    }
+
+    @Test
+    void outOfScopeGlobDoesNotMatchSiblingDirectory() {
+        // Positive-boundary: 'api-test/**' must NOT match a directory
+        // whose name merely starts with 'api-test' ("api-test-utils/...").
+        // The glob layer needs to preserve the same guarantee the literal
+        // prefix already had via trailing-slash normalisation.
+        AffectedTestsConfig globConfig = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(java.util.List.of("api-test/**"))
+                .build();
+        PathToClassMapper globMapper = new PathToClassMapper(globConfig);
+
+        Set<String> changed = Set.of(
+                "api-test-utils/src/main/java/com/example/Foo.java");
+        MappingResult result = globMapper.mapChangedFiles(changed);
+
+        assertTrue(result.outOfScopeFiles().isEmpty(),
+                "'api-test/**' must not claim 'api-test-utils/...' — name prefixes are not paths");
+    }
+
+    @Test
     void javaFileOutsideConfiguredDirsIsUnmapped() {
         // A .java file that does not sit under any configured source or test
         // directory (e.g. a root-level scratch file or a docs/examples path)

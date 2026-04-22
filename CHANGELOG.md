@@ -6,7 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `outOfScopeTestDirs` and `outOfScopeSourceDirs` now accept Ant-style
+  globs (`api-test/**`, `**/api-test/**`, `{api,perf}-test/**`) in
+  addition to the existing literal directory prefixes. Each list entry
+  is classified independently, so users can mix both shapes in the
+  same config. Surfaced after a real adopter configured
+  `outOfScopeTestDirs = ['api-test/**']` and the engine silently
+  treated it as a literal prefix — which never matched.
+- New `Hint:` line on `affectedTest --explain` when
+  `outOfScopeTestDirs` / `outOfScopeSourceDirs` are configured but
+  zero files in the diff landed in the out-of-scope bucket. Points at
+  the configured knob so the operator learns about the silent
+  misconfiguration on the trace instead of after a 30-minute full-suite
+  CI run. The hint is suppressed on empty diffs, on runs where the
+  bucket is non-empty, and on zero-config installs — so its rarity is
+  itself a signal.
 
 ## [1.9.12] — 2026-04-22
 

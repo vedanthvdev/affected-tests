@@ -6,9 +6,11 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.FileSystems;
 import java.nio.file.PathMatcher;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Maps file paths (from git diff output) to fully-qualified Java class names.
@@ -29,12 +31,21 @@ public final class PathToClassMapper {
 
     private final AffectedTestsConfig config;
     private final List<PathMatcher> ignoreMatchers;
+    private final List<Predicate<String>> outOfScopeTestMatchers;
+    private final List<Predicate<String>> outOfScopeSourceMatchers;
 
     public PathToClassMapper(AffectedTestsConfig config) {
         this.config = config;
         this.ignoreMatchers = config.ignorePaths().stream()
                 .map(p -> FileSystems.getDefault().getPathMatcher("glob:" + p))
                 .toList();
+        // Out-of-scope dirs are compiled once, up-front, so every diff
+        // pays only the matcher cost instead of re-parsing the config
+        // strings per-file. The pre-compile step is also where we decide
+        // between glob and literal-prefix semantics, so users can mix
+        // both shapes in the same list without surprise.
+        this.outOfScopeTestMatchers = compileOutOfScopeMatchers(config.outOfScopeTestDirs());
+        this.outOfScopeSourceMatchers = compileOutOfScopeMatchers(config.outOfScopeSourceDirs());
     }
 
     /**
@@ -94,8 +105,8 @@ public final class PathToClassMapper {
             // not mis-filed as an in-scope test class. Source-dir check is
             // first because real code is more common in diffs than test
             // code under an out-of-scope test dir.
-            if (isUnder(filePath, config.outOfScopeSourceDirs())
-                    || isUnder(filePath, config.outOfScopeTestDirs())) {
+            if (matchesAny(filePath, outOfScopeSourceMatchers)
+                    || matchesAny(filePath, outOfScopeTestMatchers)) {
                 outOfScopeFiles.add(filePath);
                 log.debug("Out-of-scope: {}", filePath);
                 continue;
@@ -227,20 +238,95 @@ public final class PathToClassMapper {
     }
 
     /**
-     * Boundary-aware "is this file under any of the given dirs?" check.
-     * Uses the same normalisation as {@link #tryMapToClass} so
-     * {@code "api-test/src/test/java/..."} matches {@code "api-test/src/test/java"}
-     * but {@code "my-api-test/..."} does not.
+     * Evaluates the pre-compiled out-of-scope matcher list against the
+     * normalised file path. Returns {@code true} as soon as any matcher
+     * claims the path so large configs short-circuit on the first hit.
      */
-    private static boolean isUnder(String filePath, List<String> dirs) {
-        if (dirs.isEmpty()) return false;
+    private static boolean matchesAny(String filePath, List<Predicate<String>> matchers) {
+        if (matchers.isEmpty()) return false;
         String normalized = filePath.replace('\\', '/');
+        for (Predicate<String> matcher : matchers) {
+            if (matcher.test(normalized)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Compiles each raw out-of-scope dir string into a {@link Predicate}
+     * that answers "does this (normalised) file path sit under this
+     * entry?".
+     *
+     * <p>Each entry is classified into one of two semantics based on
+     * whether it contains any glob metacharacter ({@code *}, {@code ?},
+     * {@code [}, {@code \{}):
+     *
+     * <ul>
+     *   <li>Glob entries (e.g. {@code "api-test/&#42;&#42;"}) compile to
+     *       a {@link PathMatcher} using the JVM's default file system
+     *       {@code glob:} syntax, so {@code &#42;&#42;} crosses directory
+     *       boundaries as users expect from Ant/Gradle conventions.</li>
+     *   <li>Literal entries (e.g. {@code "api-test/src/test/java"})
+     *       keep the boundary-aware prefix semantics the README has
+     *       documented since v1: the entry matches only when it sits at
+     *       the start of the path or is preceded by {@code '/'}, so
+     *       {@code "api-test"} never claims
+     *       {@code "api-test-utils/..."}.</li>
+     * </ul>
+     *
+     * <p>Mixing both shapes in the same list is supported — this is
+     * what lets existing adopters migrate at their own pace without the
+     * plugin ever silently losing coverage.
+     *
+     * <p>{@code null} and blank entries are dropped quietly: a
+     * mis-concatenated list literal on the Gradle side is not worth
+     * failing a build over, and the {@code --explain} hint already
+     * surfaces the more likely "configured but nothing matched" failure.
+     */
+    private static List<Predicate<String>> compileOutOfScopeMatchers(List<String> dirs) {
+        if (dirs == null || dirs.isEmpty()) return List.of();
+        List<Predicate<String>> matchers = new ArrayList<>(dirs.size());
         for (String dir : dirs) {
             if (dir == null || dir.isBlank()) continue;
             String normalizedDir = dir.replace('\\', '/');
-            if (!normalizedDir.endsWith("/")) normalizedDir += "/";
-            if (normalized.startsWith(normalizedDir)) return true;
-            if (normalized.contains("/" + normalizedDir)) return true;
+            if (hasGlobMetachar(normalizedDir)) {
+                PathMatcher pm = FileSystems.getDefault()
+                        .getPathMatcher("glob:" + normalizedDir);
+                matchers.add(path -> {
+                    try {
+                        return pm.matches(java.nio.file.Path.of(path));
+                    } catch (java.nio.file.InvalidPathException e) {
+                        // A changed file whose path contains characters the
+                        // platform refuses to parse (mostly a Windows-in-git
+                        // edge case) can't match any glob — fail closed so
+                        // the engine routes it through the unmapped bucket
+                        // instead of pretending the glob bit.
+                        return false;
+                    }
+                });
+            } else {
+                // Literal-prefix branch preserves the pre-v2 "boundary-aware
+                // prefix" semantics verbatim: leading-edge or /-bounded.
+                String prefix = normalizedDir.endsWith("/") ? normalizedDir : normalizedDir + "/";
+                matchers.add(path ->
+                        path.startsWith(prefix) || path.contains("/" + prefix));
+            }
+        }
+        return List.copyOf(matchers);
+    }
+
+    /**
+     * True if the string contains any character the JVM's
+     * {@code glob:} syntax treats as a metacharacter. Kept deliberately
+     * small: these four cover every pattern the README, Gradle docs,
+     * and user bug reports mention. Anything more exotic still routes
+     * through the literal-prefix branch and will fail closed (i.e.
+     * match nothing), which is safer than inferring glob intent from a
+     * stray character.
+     */
+    private static boolean hasGlobMetachar(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '*' || c == '?' || c == '[' || c == '{') return true;
         }
         return false;
     }

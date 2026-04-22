@@ -31,6 +31,8 @@ plugins {
 
 Prints the full decision trace — bucket counts, situation, action, and the tier of the priority ladder (explicit / legacy / mode / hardcoded) that picked each action — without running a single test. Useful when a CI run escalated to the full suite and the operator needs to know *why* before filing a bug.
 
+When `outOfScopeTestDirs` / `outOfScopeSourceDirs` are configured but zero files in the diff land in the out-of-scope bucket, the trace emits a one-line `Hint:` pointing at the configured knob. That's the silent-failure trap a real adopter hit: a perfectly valid-looking glob that never bit anything, which the plugin would otherwise only surface after a 30-minute full-suite CI run.
+
 Sample output:
 
 ```
@@ -164,9 +166,24 @@ affectedTests {
     // Test source sets the plugin must not dispatch via the affectedTest
     // task (e.g. Cucumber, Gatling). A diff entirely under these dirs
     // routes to ALL_FILES_OUT_OF_SCOPE → SKIPPED by default.
-    outOfScopeTestDirs = ["api-test/src/test/java", "api-test/src/test/resources"]
+    //
+    // Entries may be either:
+    //   • literal directory prefixes — "api-test/src/test/java" matches
+    //     that path at the repo root or under any module
+    //     (e.g. "services/orders/api-test/src/test/java/..."), and
+    //     "api-test" (no source-dir suffix) never claims sibling names
+    //     like "api-test-utils/...";
+    //   • Ant-style globs — "api-test/**" or "**/api-test/**" — using
+    //     the standard JVM glob syntax ("*", "**", "?", "[abc]", "{a,b}").
+    //
+    // Mix both shapes freely; the plugin picks the right semantics per
+    // entry. If you configure this knob but see "Hint:" on --explain
+    // saying zero files matched, your paths/globs don't bite — double
+    // check them (that's the silent-failure trap sanity testing caught).
+    outOfScopeTestDirs = ["api-test/**", "performance-test/**"]
 
     // Production source sets the plugin must treat as out-of-scope.
+    // Accepts the same literal-prefix / glob shapes as outOfScopeTestDirs.
     outOfScopeSourceDirs = []
 
     // ---------------- Per-situation actions (v2) ----------------

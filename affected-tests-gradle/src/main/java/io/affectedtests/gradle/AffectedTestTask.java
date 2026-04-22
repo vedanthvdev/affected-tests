@@ -724,6 +724,16 @@ public abstract class AffectedTestTask extends DefaultTask {
         }
         lines.add("Outcome:         " + outcome);
 
+        // Diagnostic hint: when out-of-scope dirs are configured but the
+        // bucket is empty, the config is almost certainly silently
+        // broken (wrong path, wrong glob shape, trailing-slash typo).
+        // We call it out inline so the operator sees the misconfiguration
+        // on the same trace that shows the buckets, rather than finding
+        // out 30 minutes later when a full suite runs that should have
+        // been skipped. Suppressed on empty-diff runs — there's nothing
+        // for the config to have bitten.
+        appendOutOfScopeHint(lines, config, result);
+
         // The full action matrix is cheap to print (five rows) and
         // invaluable for debugging "why did my explicit setting not
         // win?" — so we always include it, not only on ambiguous
@@ -738,6 +748,58 @@ public abstract class AffectedTestTask extends DefaultTask {
         }
         lines.add("=== end --explain ===");
         return lines;
+    }
+
+    /**
+     * Emits the "configured but matched nothing" hint for out-of-scope
+     * dirs when the signal points to a silent misconfiguration. Kept
+     * package-private so the explain-format tests can pin the exact
+     * conditions without spinning up Gradle.
+     *
+     * <p>The hint fires only when all three conditions hold:
+     * <ul>
+     *   <li>at least one changed file exists (nothing to diagnose on
+     *       an empty diff, and a re-run after every merge to master
+     *       would otherwise spam the false alarm);</li>
+     *   <li>at least one of {@code outOfScopeTestDirs} /
+     *       {@code outOfScopeSourceDirs} is configured (zero-config
+     *       installs never opted in, so the hint would just be noise);
+     *       </li>
+     *   <li>the out-of-scope bucket is empty (if the config IS biting,
+     *       the bucket count already tells the story).</li>
+     * </ul>
+     */
+    static void appendOutOfScopeHint(List<String> lines,
+                                     AffectedTestsConfig config,
+                                     AffectedTestsResult result) {
+        if (result.changedFiles().isEmpty()) {
+            return;
+        }
+        if (!result.buckets().outOfScopeFiles().isEmpty()) {
+            return;
+        }
+        int testEntries = config.outOfScopeTestDirs().size();
+        int sourceEntries = config.outOfScopeSourceDirs().size();
+        int totalEntries = testEntries + sourceEntries;
+        if (totalEntries == 0) {
+            return;
+        }
+
+        List<String> configuredKnobs = new ArrayList<>(2);
+        if (testEntries > 0) {
+            configuredKnobs.add("outOfScopeTestDirs");
+        }
+        if (sourceEntries > 0) {
+            configuredKnobs.add("outOfScopeSourceDirs");
+        }
+        String knobs = String.join(" / ", configuredKnobs);
+        String verb = configuredKnobs.size() == 1 ? "is" : "are";
+        String entryWord = totalEntries == 1 ? "entry" : "entries";
+
+        lines.add("Hint:            " + knobs + " " + verb + " configured ("
+                + totalEntries + " " + entryWord + ") but no file in the diff matched.");
+        lines.add("                 Values are directory prefixes "
+                + "(e.g. 'api-test/src/test/java') or globs (e.g. 'api-test/**').");
     }
 
     private static void appendSample(List<String> lines, String label, Set<String> files) {

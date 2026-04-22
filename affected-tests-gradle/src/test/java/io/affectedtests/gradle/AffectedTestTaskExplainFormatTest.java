@@ -293,4 +293,136 @@ class AffectedTestTaskExplainFormatTest {
         assertFalse(selectedTrace.contains("Outcome:         FULL_SUITE"),
                 "SELECTED result must not render FULL_SUITE on the Outcome line");
     }
+
+    @Test
+    void hintFiresWhenOutOfScopeTestDirsIsConfiguredButNoFilesMatch() {
+        // Sanity-testing the v1.9.13 adopter surfaced exactly this silent
+        // failure: a config entry like 'api-test/**' looked intentional
+        // but matched nothing, and the operator only noticed when a full
+        // CI run burned 30 minutes. The trace must call this out on every
+        // run where out-of-scope dirs are configured but zero diff files
+        // landed in the out-of-scope bucket.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("Hint:"),
+                "A silent zero-match on configured out-of-scope dirs must produce a Hint line "
+                        + "— that's the failure mode sanity testing caught on v1.9.13 adopters");
+        assertTrue(trace.contains("outOfScopeTestDirs") || trace.contains("outOfScopeSourceDirs"),
+                "Hint must name the knob that didn't bite so the operator knows where to look");
+    }
+
+    @Test
+    void hintFiresWhenOutOfScopeSourceDirsIsConfiguredButNoFilesMatch() {
+        // Symmetry: the same misconfiguration on outOfScopeSourceDirs has
+        // the same silent failure mode, so the hint must fire for it too.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeSourceDirs(List.of("legacy-service/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("Hint:"),
+                "Hint must fire for outOfScopeSourceDirs zero-match too, not just the test-dirs knob");
+    }
+
+    @Test
+    void hintDoesNotFireWhenOutOfScopeBucketIsPopulated() {
+        // Negative case: when the config IS biting, the trace already
+        // shows a non-zero 'out-of-scope' count and the hint would be
+        // noise. Keep the trace clean so the hint's rarity is itself a
+        // signal.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        Buckets buckets = new Buckets(Set.of(),
+                Set.of("api-test/src/test/java/com/example/FooSteps.java"),
+                Set.of(), Set.of(), Set.of());
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("api-test/src/test/java/com/example/FooSteps.java"),
+                Set.of(), Set.of(),
+                buckets,
+                false, true,
+                Situation.ALL_FILES_OUT_OF_SCOPE, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must not render when the out-of-scope bucket is non-empty — "
+                        + "the config is working and a hint would just be log noise");
+    }
+
+    @Test
+    void hintDoesNotFireWhenOutOfScopeDirsAreNotConfigured() {
+        // Negative case: zero-config users never opted in, so no hint is
+        // warranted. Rendering one here would train operators to ignore
+        // the hint line, defeating its purpose.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must stay silent for zero-config installs — nobody opted into out-of-scope dirs");
+    }
+
+    @Test
+    void hintDoesNotFireOnEmptyDiff() {
+        // Negative case: with no changed files the hint has nothing to
+        // diagnose — there's no diff for the config to have bitten. We
+        // silence it so an empty-diff CI re-run doesn't spam a false
+        // alarm every time master gets a merge and the next MR rebases.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of(), Set.of(), Set.of(),
+                Buckets.empty(),
+                false, true,
+                Situation.EMPTY_DIFF, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertFalse(trace.contains("Hint:"),
+                "Hint must stay silent when there are no changed files — nothing to diagnose");
+    }
 }
