@@ -1,5 +1,6 @@
 package io.affectedtests.gradle;
 
+import io.affectedtests.core.config.AffectedTestsConfig;
 import org.gradle.api.Project;
 import org.gradle.testfixtures.ProjectBuilder;
 import org.junit.jupiter.api.Test;
@@ -45,15 +46,6 @@ class AffectedTestsPluginTest {
                 "Default must be COMMITTED-ONLY so local runs match CI — WIP inclusion is an explicit opt-in");
         assertFalse(ext.getIncludeStaged().get(),
                 "Default must be COMMITTED-ONLY so local runs match CI — staged-index inclusion is an explicit opt-in");
-        // v2: no convention for the legacy booleans — leaving them unset
-        // is the signal the core builder uses to fall through to
-        // mode-based defaults. Zero-config users still observe pre-v2
-        // behaviour because the builder's hard-coded fallbacks match the
-        // old convention values 1:1 (see AffectedTestsConfigTest).
-        assertFalse(ext.getRunAllIfNoMatches().isPresent(),
-                "v2 must not install a convention for runAllIfNoMatches; the core config resolver does the translation");
-        assertFalse(ext.getRunAllOnNonJavaChange().isPresent(),
-                "v2 must not install a convention for runAllOnNonJavaChange; the core config resolver does the translation");
         assertEquals(4, ext.getStrategies().get().size());
         assertTrue(ext.getStrategies().get().contains("transitive"));
         // v2 raises the default transitive depth from 2 to 4 — real-world
@@ -92,15 +84,15 @@ class AffectedTestsPluginTest {
                 .getByType(AffectedTestsExtension.class);
         ext.getBaseRef().set("origin/main");
         ext.getTransitiveDepth().set(0);
-        ext.getRunAllOnNonJavaChange().set(false);
+        ext.getOnUnmappedFile().set("SELECTED");
 
         // Verify task picks up the change
         AffectedTestTask task = (AffectedTestTask) project.getTasks().findByName("affectedTest");
         assertNotNull(task);
         assertEquals("origin/main", task.getBaseRef().get());
         assertEquals(0, task.getTransitiveDepth().get());
-        assertFalse(task.getRunAllOnNonJavaChange().get(),
-                "Task input must reflect the extension's runAllOnNonJavaChange override");
+        assertEquals("SELECTED", task.getOnUnmappedFile().get(),
+                "Task input must reflect the extension's onUnmappedFile override");
     }
 
     @Test
@@ -144,5 +136,73 @@ class AffectedTestsPluginTest {
                 "onDiscoveryIncomplete must have no convention so the core resolver picks the mode default");
         assertFalse(ext.getGradlewTimeoutSeconds().isPresent(),
                 "gradlewTimeoutSeconds must have no convention so the task branch between watchdog/exec paths stays correct");
+    }
+
+    @Test
+    void legacyDslKnobsNoLongerExistInV2() {
+        // v2.0 breaking change: the three v1 knobs (`runAllIfNoMatches`,
+        // `runAllOnNonJavaChange`, `excludePaths`) were removed entirely
+        // after being deprecated across the v1.9.x line. This test locks
+        // in their absence so a well-intentioned "restore the getter for
+        // back-compat" revert gets caught at build time instead of
+        // silently re-opening the v1 API surface and the deprecation
+        // warnings it came with.
+        //
+        // We check reflectively rather than calling the accessors
+        // directly (which would turn into a compile error the moment
+        // someone re-adds them, masking the intent of the test). The
+        // contract is: none of the pre-v2 accessors exist anywhere on
+        // the public surface in v2+ — not on the extension, not on the
+        // task, not on the config, not on the builder.
+        java.util.List<String> forbiddenAccessors = java.util.List.of(
+                "getRunAllIfNoMatches",
+                "getRunAllOnNonJavaChange",
+                "getExcludePaths"
+        );
+        assertAllAbsent(AffectedTestsExtension.class, forbiddenAccessors,
+                "extension");
+        assertAllAbsent(AffectedTestTask.class, forbiddenAccessors,
+                "task");
+
+        // On the core config type the legacy accessors were unprefixed
+        // (`runAllIfNoMatches()`, not `getRunAllIfNoMatches()`), and
+        // `deprecationWarnings()` was its own list we also deleted — if
+        // any of them come back the two-tier resolver docs are
+        // immediately out of sync with reality.
+        java.util.List<String> forbiddenConfigAccessors = java.util.List.of(
+                "runAllIfNoMatches",
+                "runAllOnNonJavaChange",
+                "excludePaths",
+                "deprecationWarnings"
+        );
+        assertAllAbsent(AffectedTestsConfig.class, forbiddenConfigAccessors,
+                "config");
+
+        // And the three Builder setters that fed those accessors. We
+        // pin them separately because a partial revert that restores
+        // the builder-side without the getter-side would be just as
+        // bad — it would silently accept the v1 DSL in Groovy while
+        // doing nothing with it.
+        java.util.List<String> forbiddenBuilderSetters = java.util.List.of(
+                "runAllIfNoMatches",
+                "runAllOnNonJavaChange",
+                "excludePaths"
+        );
+        assertAllAbsent(AffectedTestsConfig.Builder.class, forbiddenBuilderSetters,
+                "config builder");
+    }
+
+    private static void assertAllAbsent(Class<?> type,
+                                        java.util.List<String> forbiddenNames,
+                                        String surfaceLabel) {
+        for (String name : forbiddenNames) {
+            boolean stillDeclared = java.util.Arrays.stream(type.getMethods())
+                    .anyMatch(m -> m.getName().equals(name));
+            assertFalse(stillDeclared,
+                    type.getSimpleName() + "." + name + "() must stay removed in v2 — "
+                            + "bringing it back on the " + surfaceLabel + " surface reopens "
+                            + "the v1 back-compat path and breaks the migration documented "
+                            + "in the CHANGELOG");
+        }
     }
 }

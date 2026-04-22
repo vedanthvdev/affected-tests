@@ -238,8 +238,9 @@ public final class PathToClassMapper {
      * {@code indexOf(sourceDir)} would happily pick up
      * {@code "notsrc/main/java/Foo.java"} and classify it as production
      * {@code Foo}, which in turn would keep it out of the "unmapped"
-     * bucket that drives the {@code runAllOnNonJavaChange} safety net —
-     * exactly the silent-skip behaviour that flag exists to prevent.
+     * bucket that drives the {@link io.affectedtests.core.config.Situation#UNMAPPED_FILE}
+     * safety net — exactly the silent-skip behaviour that escalation
+     * exists to prevent.
      */
     private String tryMapToClass(String filePath, java.util.List<String> sourceDirs) {
         String normalized = filePath.replace('\\', '/');

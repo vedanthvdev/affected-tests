@@ -93,8 +93,8 @@ class AffectedTestsEngineTest {
     @Test
     void emptyChangesetWithRunAllIfNoMatchesReportsItsOwnReason() throws Exception {
         // Guards a subtle bug: before this test, an empty changeset with
-        // runAllIfNoMatches=true shared the RUN_ALL_IF_NO_MATCHES reason with
-        // the post-discovery empty branch, so the task logged
+        // the empty-diff escalation enabled shared the RUN_ALL_IF_NO_MATCHES
+        // reason with the post-discovery empty branch, so the task logged
         // "no affected tests discovered" even though discovery had never
         // actually run. The two branches must be distinguishable from the
         // outside, otherwise the lifecycle log actively lies about why we
@@ -106,14 +106,14 @@ class AffectedTestsEngineTest {
                     .baseRef(head)
                     .includeUncommitted(false)
                     .includeStaged(false)
-                    .runAllIfNoMatches(true)
+                    .onEmptyDiff(Action.FULL_SUITE)
                     .build();
 
             AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
             AffectedTestsEngine.AffectedTestsResult result = engine.run();
 
             assertTrue(result.runAll(),
-                    "Empty changeset + runAllIfNoMatches=true must still flip runAll");
+                    "Empty changeset + onEmptyDiff=FULL_SUITE must still flip runAll");
             assertTrue(result.changedFiles().isEmpty());
             assertTrue(result.testClassFqns().isEmpty());
             assertEquals(EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET, result.escalationReason(),
@@ -137,14 +137,14 @@ class AffectedTestsEngineTest {
                     .baseRef(base)
                     .includeUncommitted(false)
                     .includeStaged(false)
-                    .runAllIfNoMatches(true)
+                    .onDiscoveryEmpty(Action.FULL_SUITE)
                     .transitiveDepth(0)
                     .build();
 
             AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
             AffectedTestsEngine.AffectedTestsResult result = engine.run();
 
-            assertTrue(result.runAll(), "Should set runAll when flag is enabled and no tests match");
+            assertTrue(result.runAll(), "Should set runAll when onDiscoveryEmpty=FULL_SUITE and no tests match");
             assertEquals(EscalationReason.RUN_ALL_IF_NO_MATCHES, result.escalationReason(),
                     "A discovery-empty runAll must report RUN_ALL_IF_NO_MATCHES so the task logs the right trigger");
         }
@@ -339,21 +339,33 @@ class AffectedTestsEngineTest {
                     .baseRef(base)
                     .includeUncommitted(false)
                     .includeStaged(false)
-                    .excludePaths(java.util.List.of("**/generated/**"))
+                    .ignorePaths(java.util.List.of("**/generated/**"))
                     .build();
 
             AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
             AffectedTestsEngine.AffectedTestsResult result = engine.run();
 
             assertFalse(result.runAll(),
-                    "Excluded path should not trigger the non-Java safety escalation");
+                    "Ignored path should not trigger the non-Java safety escalation");
         }
     }
 
     @Test
-    void runAllOnNonJavaChangeCanBeDisabled() throws Exception {
+    void unmappedFileEscalationCanBeDisabled() throws Exception {
         // Escape hatch: a user who wants the old "silent skip on YAML"
-        // behaviour can explicitly opt out of the safety net.
+        // behaviour can explicitly opt out of the safety net via the v2
+        // onUnmappedFile setter.
+        //
+        // We pin mode(LOCAL) because once the unmapped-file branch is
+        // disabled, a yaml-only diff falls through to discovery with
+        // zero production classes and lands on DISCOVERY_EMPTY. Under
+        // the zero-config Mode.AUTO default that resolves to CI on any
+        // GitHub-Actions-style runner (env var `CI=true`), and the CI
+        // profile escalates DISCOVERY_EMPTY to FULL_SUITE — so an
+        // unpinned test would pass locally and fail on CI, which is
+        // exactly what happened on PR #34. This pin mirrors the v1→v2
+        // migration path we document in README/CHANGELOG for users
+        // coming off `runAllOnNonJavaChange = false`.
         try (Git git = initRepoWithInitialCommit()) {
             String base = git.log().call().iterator().next().getName();
 
@@ -369,17 +381,18 @@ class AffectedTestsEngineTest {
                     .baseRef(base)
                     .includeUncommitted(false)
                     .includeStaged(false)
-                    .runAllOnNonJavaChange(false)
+                    .mode(Mode.LOCAL)
+                    .onUnmappedFile(Action.SELECTED)
                     .build();
 
             AffectedTestsEngine engine = new AffectedTestsEngine(config, tempDir);
             AffectedTestsEngine.AffectedTestsResult result = engine.run();
 
             assertFalse(result.runAll(),
-                    "With runAllOnNonJavaChange=false the old silent-skip behaviour must be preserved");
+                    "With onUnmappedFile=SELECTED the old silent-skip behaviour must be preserved");
             assertTrue(result.testClassFqns().isEmpty());
             assertEquals(EscalationReason.NONE, result.escalationReason(),
-                    "Opting out of the non-Java escalation must also clear its reason tag");
+                    "Opting out of the unmapped-file escalation must also clear its reason tag");
         }
     }
 

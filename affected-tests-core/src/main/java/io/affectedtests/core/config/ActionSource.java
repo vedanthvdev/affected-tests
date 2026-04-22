@@ -20,23 +20,10 @@ public enum ActionSource {
     EXPLICIT,
 
     /**
-     * The caller set one of the legacy boolean flags
-     * ({@code runAllIfNoMatches}, {@code runAllOnNonJavaChange}) and the
-     * translation shim picked the action from it.
+     * The caller did not set an explicit action for this situation, and
+     * the resolved {@link Mode} default supplied the action. When no
+     * mode is configured, {@link Mode#AUTO} detects CI vs. local from
+     * the environment and applies the corresponding default table.
      */
-    LEGACY_BOOLEAN,
-
-    /**
-     * The caller set an explicit {@link Mode} but not the more-specific
-     * explicit or legacy setting, and the mode's default table supplied
-     * the action.
-     */
-    MODE_DEFAULT,
-
-    /**
-     * No caller setting at any tier applies; the pre-v2 hardcoded
-     * default was used. Zero-config installs observe this for every
-     * situation until they set a mode.
-     */
-    HARDCODED_DEFAULT
+    MODE_DEFAULT
 }

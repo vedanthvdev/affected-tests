@@ -45,10 +45,8 @@ flowchart TD
 
     Resolve{{"Resolve Action<br/>(priority order)"}}:::core
     Resolve --> Explicit["1 · explicit onXxx setting"]:::priority
-    Explicit --> Legacy["2 · legacy boolean<br/>(runAllIfNoMatches / runAllOnNonJavaChange)"]:::priority
-    Legacy --> ModeDefault["3 · mode default<br/>(auto · local · ci · strict)"]:::priority
-    ModeDefault --> Hardcoded["4 · pre-v2 hardcoded default"]:::priority
-    Hardcoded --> Action{Action}:::core
+    Explicit --> ModeDefault["2 · mode default<br/>(auto · local · ci · strict)"]:::priority
+    ModeDefault --> Action{Action}:::core
 
     Action -->|SELECTED| Router[Group FQNs by<br/>owning Gradle subproject]:::core
     Action -->|FULL_SUITE| FullSuite["gradle test<br/>full suite · no --tests filter"]:::io

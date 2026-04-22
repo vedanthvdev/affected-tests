@@ -119,27 +119,6 @@ class AffectedTestTaskExplainFormatTest {
     }
 
     @Test
-    void actionSourceSurfacesLegacyBooleanWhenOnlyLegacyFlagIsSet() {
-        AffectedTestsConfig config = AffectedTestsConfig.builder()
-                .runAllIfNoMatches(false)
-                .build();
-        AffectedTestsResult result = new AffectedTestsResult(
-                Set.of(), Map.of(),
-                Set.of("README.md"), Set.of(), Set.of(),
-                new Buckets(Set.of("README.md"), Set.of(), Set.of(), Set.of(), Set.of()),
-                false, true,
-                Situation.ALL_FILES_IGNORED,
-                Action.SKIPPED,
-                EscalationReason.NONE);
-
-        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
-
-        assertTrue(trace.contains("Action:          SKIPPED (source: legacy boolean"),
-                "Setting only the legacy boolean must surface as LEGACY_BOOLEAN in the trace, "
-                        + "not silently show up as a mode default or explicit setting");
-    }
-
-    @Test
     void actionSourceSurfacesExplicitSettingWhenOnXxxWins() {
         AffectedTestsConfig config = AffectedTestsConfig.builder()
                 .onAllFilesIgnored(Action.FULL_SUITE)
@@ -156,7 +135,7 @@ class AffectedTestTaskExplainFormatTest {
         String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
 
         assertTrue(trace.contains("source: explicit onXxx setting"),
-                "Explicit setting must surface distinctly from legacy/mode/hardcoded sources — "
+                "Explicit setting must surface distinctly from the mode-default source — "
                         + "otherwise the operator can't tell what survives a future default change");
     }
 
@@ -186,7 +165,12 @@ class AffectedTestTaskExplainFormatTest {
     }
 
     @Test
-    void actionSourceSurfacesHardcodedDefaultForZeroConfig() {
+    void actionSourceSurfacesModeDefaultForZeroConfig() {
+        // v2.0 removed the pre-v2 hardcoded-default tier — zero-config
+        // installs now resolve straight to a mode default (AUTO → LOCAL
+        // or CI based on env detection). The --explain trace must name
+        // that honestly so operators know the resolved action can shift
+        // between LOCAL and CI based on where the build runs.
         AffectedTestsConfig config = AffectedTestsConfig.builder().build();
         AffectedTestsResult result = new AffectedTestsResult(
                 Set.of(), Map.of(),
@@ -199,10 +183,10 @@ class AffectedTestTaskExplainFormatTest {
 
         String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
 
-        assertTrue(trace.contains("source: pre-v2 hardcoded default"),
-                "Zero-config installs must see the pre-v2 label — so operators know upgrading "
-                        + "the plugin's defaults could silently change their behaviour if they "
-                        + "do not pin a mode or onXxx setting");
+        assertTrue(trace.contains("source: mode default"),
+                "Zero-config installs must surface MODE_DEFAULT in v2.0 — the pre-v2 "
+                        + "hardcoded-default tier has been removed and every action now "
+                        + "resolves through a concrete mode");
     }
 
     @Test

@@ -231,7 +231,7 @@ class PathToClassMapperTest {
         // Explicit opt-out must stay silent — an excluded file is neither
         // mapped nor flagged as unmapped.
         AffectedTestsConfig excludeConfig = AffectedTestsConfig.builder()
-                .excludePaths(java.util.List.of("**/generated/**"))
+                .ignorePaths(java.util.List.of("**/generated/**"))
                 .build();
         PathToClassMapper excludeMapper = new PathToClassMapper(excludeConfig);
 

@@ -6,6 +6,76 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed — v2.0 breaking release: legacy v1 knobs are gone
+
+The three v1 configuration knobs that were deprecated across the v1.9.x
+line have been removed from the plugin entirely. This is the long-promised
+v2.0 breaking release (Phase 3 of `docs/DESIGN-v2.md`). The v2
+situation/action DSL is now the only configuration surface, which keeps
+`--explain` output honest, the priority-ladder resolver simple, and the
+migration path explicit for operators who have been getting deprecation
+warnings since v1.9.18.
+
+- **Removed `runAllIfNoMatches` from the Gradle DSL and
+  `AffectedTestsConfig`.** The v2 replacements
+  (`onEmptyDiff`, `onDiscoveryEmpty`) have been available since v1.9.18
+  and cover the same behaviour with independent per-situation control.
+  Callers who set `runAllIfNoMatches = true` in v1 must now set
+  `onEmptyDiff = "FULL_SUITE"` and/or `onDiscoveryEmpty = "FULL_SUITE"`
+  depending on whether they want the safety net on empty diffs,
+  post-discovery misses, or both.
+- **Removed `runAllOnNonJavaChange` from the Gradle DSL and
+  `AffectedTestsConfig`.** The v2 replacement is `onUnmappedFile`, which
+  has been available since v1.9.18. `runAllOnNonJavaChange = true`
+  maps to `onUnmappedFile = "FULL_SUITE"`; the explicit opt-out case
+  (`runAllOnNonJavaChange = false`) maps to `onUnmappedFile = "SELECTED"`.
+- **Removed `excludePaths` — use `ignorePaths` instead.** `excludePaths`
+  was the pre-v1.9.18 name and has been an alias of `ignorePaths` since
+  v1.9.18. In v2 it is gone; callers must rename to `ignorePaths`.
+- **Removed `ActionSource.LEGACY_BOOLEAN` and
+  `ActionSource.HARDCODED_DEFAULT`.** The priority ladder the resolver
+  walks is now a two-tier structure: explicit `onXxx` > mode default.
+  Zero-config installs always resolve to a concrete mode (`LOCAL` / `CI`
+  via `Mode.AUTO` detection, or `STRICT` when pinned) so there is no
+  longer a hardcoded-default fall-through to report. `--explain` output
+  drops the corresponding `(source: legacy boolean …)` and
+  `(source: pre-v2 hardcoded default)` phrases — anything still printing
+  those strings is now either `(source: explicit onXxx setting)` or
+  `(source: mode default)`.
+- **Removed `AffectedTestsConfig.deprecationWarnings()` and the startup
+  warning loop.** With the legacy knobs gone, there is nothing left to
+  warn about. The Gradle task's "deprecation" log line disappears in
+  v2, which is itself a (small) behaviour change: integrations that
+  grep for `runAllIfNoMatches is deprecated` in CI logs must drop that
+  check.
+
+**Migration** — the mapping is mechanical and the full migration guide
+lives in `docs/DESIGN-v2.md`, but the short version is:
+
+| v1 (removed in v2.0)                   | v2 replacement                                   |
+| -------------------------------------- | ------------------------------------------------ |
+| `runAllIfNoMatches = true`             | `onEmptyDiff = "FULL_SUITE"` + `onDiscoveryEmpty = "FULL_SUITE"` |
+| `runAllIfNoMatches = false`            | `mode = "local"` **or** explicit `onEmptyDiff = "SKIPPED"` + `onDiscoveryEmpty = "SKIPPED"`. Simply deleting the line is not equivalent — under the new zero-config `mode = "auto"` the `ci` profile escalates `DISCOVERY_EMPTY` to `FULL_SUITE`, so a v1 pipeline that used `false` to suppress the no-match full-suite will regress silently unless one of the two explicit paths is picked. |
+| `runAllOnNonJavaChange = true`         | `onUnmappedFile = "FULL_SUITE"`                  |
+| `runAllOnNonJavaChange = false`        | `onUnmappedFile = "SELECTED"`                    |
+| `excludePaths = […]`                   | `ignorePaths = […]`                              |
+
+Regression coverage:
+
+- `AffectedTestsPluginTest.legacyDslKnobsNoLongerExistInV2` reflectively
+  pins the absence of the three legacy getters on
+  `AffectedTestsExtension` so a well-intentioned "restore the getter
+  for back-compat" revert fails the build instead of silently
+  re-opening the v1 API surface.
+- `AffectedTestsConfigTest.actionSourceReflectsResolutionTierOrdering`
+  pins that the only two `ActionSource` values that survive in v2 are
+  `EXPLICIT` and `MODE_DEFAULT`, so a resolver refactor cannot
+  reintroduce the old tiers without being caught.
+- `AffectedTestTaskExplainFormatTest.actionSourceSurfacesModeDefaultForZeroConfig`
+  pins the `--explain` trace wording for zero-config installs under
+  the new two-tier model, so the pre-v2 `(source: pre-v2 hardcoded
+  default)` string cannot sneak back into CI logs.
+
 ### Added — discovery-incomplete signal + nested `gradlew` timeout (v1.9.22)
 
 The two deferred findings from the v1.9.21 reliability batch: both close

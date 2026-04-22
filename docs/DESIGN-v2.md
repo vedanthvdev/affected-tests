@@ -457,12 +457,21 @@ directly instead of working around the tool.
 - Docs flip all examples to new config.
 - README adds a migration section.
 
-### Phase 3 — Breaking (next major, e.g. v2.0.0)
+### Phase 3 — Breaking (v2.0.0) ✅ done
 
-- Remove legacy `runAllIfNoMatches` / `runAllOnNonJavaChange` / `excludePaths`.
-- Rename `runAllOnNonJavaChange`'s successor if we choose a better name
-  (e.g. `onUnmappedFile` — already the Phase 1 name, so this collapses
-  naturally).
+- ✅ Removed legacy `runAllIfNoMatches` / `runAllOnNonJavaChange` /
+  `excludePaths` from `AffectedTestsExtension`, `AffectedTestsConfig`,
+  and the resolver priority ladder.
+- ✅ Removed `ActionSource.LEGACY_BOOLEAN` and
+  `ActionSource.HARDCODED_DEFAULT`. The resolver is now a two-tier
+  structure (explicit `onXxx` > mode default); `Mode.AUTO` always
+  resolves to a concrete mode at `effectiveMode()`, so there is no
+  hardcoded-default fall-through to report.
+- ✅ Removed the `AffectedTestsConfig.deprecationWarnings()` list and
+  the startup warning loop the Gradle task used to surface them.
+- ✅ Regression test (`legacyDslKnobsNoLongerExistInV2`) reflectively
+  pins the absence of the three removed getters so a back-compat
+  revert is caught at build time.
 
 ---
 
