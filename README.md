@@ -29,7 +29,7 @@ plugins {
 ./gradlew affectedTest --explain
 ```
 
-Prints the full decision trace — bucket counts, situation, action, and the tier of the priority ladder (explicit / legacy / mode / hardcoded) that picked each action — without running a single test. Useful when a CI run escalated to the full suite and the operator needs to know *why* before filing a bug.
+Prints the full decision trace — bucket counts, situation, action, and the tier of the priority ladder (explicit `onXxx` / mode default) that picked each action — without running a single test. Useful when a CI run escalated to the full suite and the operator needs to know *why* before filing a bug.
 
 When `outOfScopeTestDirs` / `outOfScopeSourceDirs` are configured but zero files in the diff land in the out-of-scope bucket *and* the situation is `DISCOVERY_SUCCESS` or `DISCOVERY_EMPTY`, the trace emits a one-line `Hint:` pointing at the configured knob. That's the silent-failure trap a real adopter hit: a perfectly valid-looking glob that never bit anything, which the plugin would otherwise only surface after a 30-minute full-suite CI run. The hint is suppressed on `EMPTY_DIFF`, `ALL_FILES_IGNORED`, `ALL_FILES_OUT_OF_SCOPE`, and `UNMAPPED_FILE` because those branches ran the way they did for reasons an out-of-scope pattern could not have influenced.
 
@@ -38,7 +38,7 @@ Sample output:
 ```
 === Affected Tests — decision trace (--explain) ===
 Base ref:        origin/master
-Mode:            unset (effective: n/a (pre-v2 defaults))
+Mode:            AUTO (effective: LOCAL)
 Changed files:   3
 Buckets:
   ignored         1
@@ -50,15 +50,16 @@ Buckets:
   production sample: src/main/java/com/example/Foo.java
   unmapped sample: build.gradle
 Situation:       UNMAPPED_FILE
-Action:          FULL_SUITE (source: pre-v2 hardcoded default)
-Outcome:         FULL_SUITE — runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff
+Action:          FULL_SUITE (source: mode default)
+Outcome:         FULL_SUITE — onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff
 Action matrix (situation → action [source]):
-  EMPTY_DIFF               SKIPPED [pre-v2 hardcoded default]
-  ALL_FILES_IGNORED        SKIPPED [pre-v2 hardcoded default]
-  ALL_FILES_OUT_OF_SCOPE   SKIPPED [pre-v2 hardcoded default]
-  UNMAPPED_FILE            FULL_SUITE [pre-v2 hardcoded default]
-  DISCOVERY_EMPTY          SKIPPED [pre-v2 hardcoded default]
-  DISCOVERY_SUCCESS        SELECTED [explicit onXxx setting]
+  EMPTY_DIFF               SKIPPED    [mode default]
+  ALL_FILES_IGNORED        SKIPPED    [mode default]
+  ALL_FILES_OUT_OF_SCOPE   SKIPPED    [mode default]
+  UNMAPPED_FILE            FULL_SUITE [mode default]
+  DISCOVERY_INCOMPLETE     SELECTED   [mode default]
+  DISCOVERY_EMPTY          SKIPPED    [mode default]
+  DISCOVERY_SUCCESS        SELECTED   [explicit onXxx setting]
 === end --explain ===
 ```
 
@@ -96,11 +97,11 @@ Every `affectedTest` run prints exactly one summary line in the form `Affected T
 
 ```
 Affected Tests: SELECTED (DISCOVERY_SUCCESS) — 3 changed file(s), 2 production class(es), 5 test class(es) affected
-Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
+Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
 Affected Tests: SKIPPED (ALL_FILES_IGNORED) — 1 changed file(s); every changed file matched ignorePaths.
 ```
 
-The outcome (`SELECTED` / `FULL_SUITE` / `SKIPPED`) and the situation that produced it are first-class fields on every branch, so CI dashboards can `grep -E '^Affected Tests: (SELECTED|FULL_SUITE|SKIPPED)'` and bucket runs without parsing the tail. Every pre-v2 phrase (`running full suite`, `runAllIfNoMatches=true`, `runAllOnNonJavaChange=true`, `no affected tests discovered`) still appears verbatim in the reason segment, so existing greps keep working.
+The outcome (`SELECTED` / `FULL_SUITE` / `SKIPPED`) and the situation that produced it are first-class fields on every branch, so CI dashboards can `grep -E '^Affected Tests: (SELECTED|FULL_SUITE|SKIPPED)'` and bucket runs without parsing the tail.
 
 On a `SELECTED` outcome, the task also prints the first few FQNs per module at lifecycle level so a reviewer can sanity-check the dispatch from the default CI log without rerunning with `--info`:
 
@@ -142,20 +143,20 @@ The preview caps at five FQNs per module; `--info` still surfaces the full per-F
 | `FULL_SUITE` | Run the entire test suite (no `--tests` filter). |
 | `SKIPPED` | Exit 0 without running tests. |
 
-Every situation gets an independently-configurable action. The matrix is resolved in strict priority order: **explicit `onXxx`** setting → **legacy boolean** (`runAllIfNoMatches` / `runAllOnNonJavaChange`) → **`mode` profile default** → **pre-v2 hardcoded default**. So nothing you configure today silently regresses tomorrow.
+Every situation gets an independently-configurable action. The matrix is resolved in strict priority order: **explicit `onXxx`** setting → **`mode` profile default**. Zero-config installs always resolve to a concrete mode via `Mode.AUTO` detection, so nothing you configure today silently regresses tomorrow.
 
 ### Mode profiles
 
 `mode` seeds the defaults for situations you haven't explicitly configured:
 
-| Mode | `EMPTY_DIFF` | `ALL_FILES_IGNORED` | `ALL_FILES_OUT_OF_SCOPE` | `UNMAPPED_FILE` | `DISCOVERY_EMPTY` |
-|---|---|---|---|---|---|
-| `local` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | SKIPPED |
-| `ci` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | **FULL_SUITE** |
-| `strict` | FULL_SUITE | FULL_SUITE | SKIPPED | FULL_SUITE | FULL_SUITE |
+| Mode | `EMPTY_DIFF` | `ALL_FILES_IGNORED` | `ALL_FILES_OUT_OF_SCOPE` | `UNMAPPED_FILE` | `DISCOVERY_EMPTY` | `DISCOVERY_INCOMPLETE` |
+|---|---|---|---|---|---|---|
+| `local` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | SKIPPED | SELECTED |
+| `ci` | SKIPPED | SKIPPED | SKIPPED | FULL_SUITE | **FULL_SUITE** | **FULL_SUITE** |
+| `strict` | FULL_SUITE | FULL_SUITE | SKIPPED | FULL_SUITE | FULL_SUITE | FULL_SUITE |
 | `auto` | Detects `CI` / `GITHUB_ACTIONS` / `GITLAB_CI` / `JENKINS_HOME` and resolves to `ci` or `local`. |
 
-Leaving `mode` unset keeps the pre-v2 zero-config behaviour (same as `local` plus the legacy `runAllOnNonJavaChange=true` safety net).
+Leaving `mode` unset picks `auto`, which resolves to `local` or `ci` depending on the environment. The `UNMAPPED_FILE → FULL_SUITE` safety net is the default in every built-in mode, so a zero-config install still escalates on unmapped files without any DSL wiring.
 
 ## Configuration
 
@@ -339,7 +340,7 @@ The `onUnmappedFile = "full_suite"` default follows the "run more, never run les
 
 ### Migrating from v1 config
 
-Existing configs keep working — **no pipeline breaks today**. But the legacy knobs are deprecated and will be removed in **v2.0.0**. If any of these appear in your `build.gradle`, the plugin will print a `WARNING` on every `affectedTest` run naming the replacement:
+**v2.0.0 removed the three v1 legacy knobs.** If any of these still appear in your `build.gradle`, Gradle configuration will fail with an unknown-property error before the `affectedTest` task runs:
 
 - `runAllIfNoMatches`
 - `runAllOnNonJavaChange`
@@ -349,16 +350,16 @@ Existing configs keep working — **no pipeline breaks today**. But the legacy k
 
 | Release | What happens |
 |---|---|
-| **v1.9.x and earlier** | Legacy knobs work silently. No warnings. |
-| **v1.10.x** (this release) | Legacy knobs still work. A per-run `WARNING: [affected-tests] '<knob>' is deprecated…` names each one and its replacement. Zero-config users see nothing. |
-| **v2.0.0** (next major) | Legacy knobs removed. `excludePaths`, `runAllIfNoMatches`, `runAllOnNonJavaChange` become unknown properties — Gradle will fail configuration. |
+| **v1.9.x and earlier** | Legacy knobs worked silently. No warnings. |
+| **v1.10.x – v1.11.x** | Legacy knobs still worked. A per-run `WARNING: [affected-tests] '<knob>' is deprecated…` named each one and its replacement. Zero-config users saw nothing. |
+| **v2.0.0** (this release) | **Legacy knobs removed.** `excludePaths`, `runAllIfNoMatches`, `runAllOnNonJavaChange` are unknown properties — Gradle configuration fails. Migrate using the table below. |
 
 #### Before / after
 
 | v1 config | v2 equivalent | Why |
 |---|---|---|
 | `runAllIfNoMatches = true` | `onEmptyDiff = "full_suite"` **and** `onDiscoveryEmpty = "full_suite"` | The v1 flag conflated two different situations ("git diff is empty" vs "discovery found nothing"). v2 splits them so you can e.g. skip empty-diff runs but still fall back to full suite when discovery fails. |
-| `runAllIfNoMatches = false` (explicit) | Leave `onEmptyDiff` / `onDiscoveryEmpty` unset (defaults to `SKIPPED`) or set `mode = "local"` | Same effect, zero config. |
+| `runAllIfNoMatches = false` (explicit) | **Set `mode = "local"`, or pin `onEmptyDiff = "skipped"` + `onDiscoveryEmpty = "skipped"` explicitly.** Do *not* just delete the line — in v2 the zero-config `mode = "auto"` resolves to `ci` in a CI runner, and `ci` escalates `DISCOVERY_EMPTY` to `FULL_SUITE`. A v1 pipeline that set `runAllIfNoMatches = false` specifically to prevent the discovery-empty branch from flipping to full suite will start running the full suite on every no-match MR unless one of these two knobs is pinned. |
 | `runAllOnNonJavaChange = true` | `onUnmappedFile = "full_suite"` | Single-situation knob, same semantics. |
 | `runAllOnNonJavaChange = false` | `onUnmappedFile = "selected"` | Plugin treats the unmapped file as if absent and continues to discovery. |
 | `excludePaths = ["**/generated/**"]` | `ignorePaths = ["**/generated/**"]` | Identical semantics — just a rename. |
@@ -411,7 +412,10 @@ Did you set runAllIfNoMatches?
 │  └─ set onEmptyDiff = "full_suite" AND onDiscoveryEmpty = "full_suite"
 │     (or just set mode = "ci" / mode = "strict" — both imply it)
 └─ runAllIfNoMatches = false
-   └─ just delete the line (v2 default is SKIPPED)
+   └─ DO NOT just delete the line. In v2, zero-config AUTO-in-CI
+      escalates DISCOVERY_EMPTY to FULL_SUITE. Either:
+      · pin mode = "local", OR
+      · pin onEmptyDiff = "skipped" + onDiscoveryEmpty = "skipped"
 
 Did you set runAllOnNonJavaChange?
 ├─ No                           → nothing to do
@@ -425,15 +429,15 @@ Did you set excludePaths?
 └─ excludePaths = [...] → rename to ignorePaths with the same list
 ```
 
-#### What the summary log tells you during migration
+#### What the summary log tells you after migration
 
-Every `affectedTest` run prints the outcome + situation + legacy flag (if applicable) on one line, so existing grep-based CI dashboards keep matching during and after the migration:
+Every `affectedTest` run prints the outcome + situation + the v2 knob that fired on one line, so CI dashboards can key off a stable vocabulary:
 
 ```
-Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
+Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
 ```
 
-Both vocabularies appear — the v2 name (`onUnmappedFile=FULL_SUITE`) and the legacy name (`runAllOnNonJavaChange=true`) — so you can migrate without breaking any existing alert rules.
+**Breaking-change note for grep-based alerting:** v1 summary lines carried both the v1 name (`runAllOnNonJavaChange=true`) and the v2 name (`onUnmappedFile=FULL_SUITE`) to ease migration. v2.0 drops the v1 vocabulary. Any CI alert rules keyed on `runAllIfNoMatches=true`, `runAllOnNonJavaChange=true`, or the `[affected-tests] '…' is deprecated` warning must be updated to the v2 knob names.
 
 ## Project Structure
 

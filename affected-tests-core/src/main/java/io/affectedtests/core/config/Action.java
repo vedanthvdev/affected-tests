@@ -17,12 +17,11 @@ package io.affectedtests.core.config;
  *       honestly (selection succeeded, set happened to be empty) rather than
  *       claim the run was skipped.</li>
  *   <li>{@link #FULL_SUITE} — flip to running every test the project knows
- *       about. The legacy {@code runAllIfNoMatches} / {@code runAllOnNonJavaChange}
- *       booleans map onto this action via the shim in
- *       {@link AffectedTestsConfig.Builder#build()}.</li>
- *   <li>{@link #SKIPPED} — run no tests at all. Previously impossible to
- *       express without also disabling the plugin; the situation-specific
- *       knobs in v2 make it first-class.</li>
+ *       about. The typical escalation target for "ambiguous" situations
+ *       such as {@link Situation#UNMAPPED_FILE}.</li>
+ *   <li>{@link #SKIPPED} — run no tests at all. Expressed per-situation via
+ *       the {@code onXxx} DSL so operators can silence branches that do
+ *       not justify a full suite (e.g. {@code onAllFilesIgnored=SKIPPED}).</li>
  * </ul>
  */
 public enum Action {

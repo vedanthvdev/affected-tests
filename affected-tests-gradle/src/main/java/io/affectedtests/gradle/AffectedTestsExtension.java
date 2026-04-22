@@ -15,8 +15,7 @@ import org.gradle.api.provider.Property;
  *     // diff while iterating on tests locally.
  *     includeUncommitted = false
  *     includeStaged = false
- *     // v2: per-situation actions (replaces runAllIfNoMatches / runAllOnNonJavaChange).
- *     // See README.md "Migrating from v1 config" for the full table.
+ *     // v2: per-situation actions. See README.md for the full table.
  *     mode = "ci"
  *     onEmptyDiff          = "full_suite"
  *     onAllFilesOutOfScope = "skipped"
@@ -64,28 +63,6 @@ public abstract class AffectedTestsExtension {
     public abstract Property<Boolean> getIncludeStaged();
 
     /**
-     * Run full test suite if no affected tests are found.
-     * Default: {@code false}.
-     *
-     * @return the run-all-if-no-matches property
-     */
-    public abstract Property<Boolean> getRunAllIfNoMatches();
-
-    /**
-     * Force a full test run whenever the change set contains any file that
-     * cannot be resolved to a Java class under {@link #getSourceDirs()} or
-     * {@link #getTestDirs()} — for example {@code application.yml},
-     * {@code build.gradle}, a Liquibase changelog, or a logback config.
-     * Files matching {@link #getExcludePaths()} are treated as an explicit
-     * opt-out and do not trigger the escalation.
-     *
-     * <p>Default: {@code true} — "run more, never run less".
-     *
-     * @return the run-all-on-non-java-change property
-     */
-    public abstract Property<Boolean> getRunAllOnNonJavaChange();
-
-    /**
      * Strategies to use for test discovery. Valid values:
      * {@code "naming"}, {@code "usage"}, {@code "impl"}, {@code "transitive"}.
      * Default: all four.
@@ -131,19 +108,6 @@ public abstract class AffectedTestsExtension {
      * @return the test dirs list property
      */
     public abstract ListProperty<String> getTestDirs();
-
-    /**
-     * Glob patterns for files to exclude from analysis.
-     * v2 back-compat alias for {@link #getIgnorePaths()}. Default is an
-     * empty Gradle property — when unset, the v2 {@code ignorePaths}
-     * default applies (a broader list than the pre-v2 single-entry
-     * {@code ["**}{@code /generated/**"]} list).
-     *
-     * @return the exclude paths list property
-     * @deprecated prefer {@link #getIgnorePaths()} in new configs.
-     */
-    @Deprecated
-    public abstract ListProperty<String> getExcludePaths();
 
     /**
      * Glob patterns for files that must never influence test selection —
@@ -200,13 +164,11 @@ public abstract class AffectedTestsExtension {
     /**
      * Execution profile ({@code "auto"}, {@code "local"}, {@code "ci"},
      * or {@code "strict"}). Controls per-situation default actions
-     * when neither the explicit {@code onXxx} setting nor the legacy
-     * boolean translation has picked one.
+     * when the explicit {@code onXxx} setting is not set.
      *
-     * <p>Default: unset — which preserves the pre-v2 defaults for
-     * zero-config users. Setting it to {@code "auto"} is the
-     * recommended migration: it detects CI via common env vars and
-     * picks the CI defaults there, and the LOCAL defaults otherwise.
+     * <p>Default: unset — which resolves to {@link io.affectedtests.core.config.Mode#AUTO}
+     * on the core config. {@code AUTO} detects CI via common env vars
+     * and picks the CI defaults there, and the LOCAL defaults otherwise.
      *
      * @return the mode property
      */
@@ -266,9 +228,7 @@ public abstract class AffectedTestsExtension {
      *
      * <p>Unset falls through to the {@link #getMode() mode} default
      * (CI and STRICT escalate to {@code full_suite}; LOCAL keeps the
-     * partial selection). The legacy {@code runAllIfNoMatches=true} shim
-     * also maps to {@code full_suite} here because it is the closest
-     * existing signal for "I don't trust a silent no-signal result".
+     * partial selection).
      *
      * @return the on-discovery-incomplete property
      */

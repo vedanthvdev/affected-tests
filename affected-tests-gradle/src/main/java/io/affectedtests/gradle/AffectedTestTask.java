@@ -95,42 +95,6 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getIncludeStaged();
 
     /**
-     * Whether to run the full test suite when no affected tests are found.
-     * v2 back-compat — translated into {@link Situation#EMPTY_DIFF},
-     * {@link Situation#ALL_FILES_IGNORED},
-     * {@link Situation#ALL_FILES_OUT_OF_SCOPE}, and
-     * {@link Situation#DISCOVERY_EMPTY} actions by the core config
-     * builder when set. Unset means "let the v2 resolver pick defaults".
-     * Default: unset (matching pre-v2 {@code false} once translated).
-     *
-     * <p>Marked {@link org.gradle.api.tasks.Optional @Optional} because
-     * the extension no longer installs a convention — the Gradle task
-     * must be free to leave the property unset when the user has not
-     * overridden the legacy boolean.
-     *
-     * @return the run-all-if-no-matches property
-     */
-    @Input
-    @org.gradle.api.tasks.Optional
-    public abstract Property<Boolean> getRunAllIfNoMatches();
-
-    /**
-     * Whether to force a full test run when the change set contains any
-     * file that cannot be resolved to a Java class under the configured
-     * source/test directories. v2 back-compat — translates into
-     * {@link Situation#UNMAPPED_FILE}'s action.
-     *
-     * <p>Marked {@link org.gradle.api.tasks.Optional @Optional} because
-     * the extension no longer installs a convention; leaving it unset
-     * is what lets the v2 resolver reach its own defaults.
-     *
-     * @return the run-all-on-non-java-change property
-     */
-    @Input
-    @org.gradle.api.tasks.Optional
-    public abstract Property<Boolean> getRunAllOnNonJavaChange();
-
-    /**
      * Discovery strategies to use for finding affected tests.
      * Valid values: {@code "naming"}, {@code "usage"}, {@code "impl"}, {@code "transitive"}.
      * Default: all four.
@@ -184,18 +148,6 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getTestDirs();
 
     /**
-     * v2 back-compat alias for {@link #getIgnorePaths()}. When neither
-     * is set, the core config's default ignore-path list applies.
-     *
-     * @return the exclude paths list property
-     * @deprecated prefer {@link #getIgnorePaths()}.
-     */
-    @Input
-    @org.gradle.api.tasks.Optional
-    @Deprecated
-    public abstract ListProperty<String> getExcludePaths();
-
-    /**
      * Glob patterns for files that must never influence test selection.
      * Optional — when unset, the core config's default list applies.
      *
@@ -246,8 +198,8 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Execution profile name — one of {@code "auto"}, {@code "local"},
-     * {@code "ci"}, {@code "strict"}. Unset leaves defaults in
-     * pre-v2 mode.
+     * {@code "ci"}, {@code "strict"}. Unset resolves to {@code "auto"}
+     * in the core config, which detects CI from common env vars.
      *
      * @return the mode property
      */
@@ -366,16 +318,6 @@ public abstract class AffectedTestTask extends DefaultTask {
 
         AffectedTestsConfig config = buildConfig();
 
-        // Surface each deprecation warning exactly once before the
-        // engine runs so the message sits adjacent to the config it
-        // describes. Using {@code warn} (not {@code lifecycle}) keeps
-        // the warning visible in CI log excerpts that filter below
-        // lifecycle, and lets build-scan deprecation dashboards pick
-        // it up as a first-class warning rather than an info line.
-        for (String warning : config.deprecationWarnings()) {
-            getLogger().warn(warning);
-        }
-
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
 
@@ -431,9 +373,9 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Assembles the immutable core config from the task's Gradle
-     * properties. Legacy booleans and the new situation/mode knobs are
-     * all optional at this layer; the core builder handles precedence
-     * (explicit > legacy-boolean > mode > pre-v2 default).
+     * properties. All situation/mode knobs are optional at this layer;
+     * the core builder handles precedence via the v2 two-tier ladder
+     * (explicit {@code onXxx} > mode default).
      */
     private AffectedTestsConfig buildConfig() {
         AffectedTestsConfig.Builder builder = AffectedTestsConfig.builder()
@@ -448,16 +390,8 @@ public abstract class AffectedTestTask extends DefaultTask {
                 .includeImplementationTests(getIncludeImplementationTests().get())
                 .implementationNaming(getImplementationNaming().get());
 
-        if (getRunAllIfNoMatches().isPresent()) {
-            builder.runAllIfNoMatches(getRunAllIfNoMatches().get());
-        }
-        if (getRunAllOnNonJavaChange().isPresent()) {
-            builder.runAllOnNonJavaChange(getRunAllOnNonJavaChange().get());
-        }
         if (getIgnorePaths().isPresent() && !getIgnorePaths().get().isEmpty()) {
             builder.ignorePaths(getIgnorePaths().get());
-        } else if (getExcludePaths().isPresent() && !getExcludePaths().get().isEmpty()) {
-            builder.excludePaths(getExcludePaths().get());
         }
         if (getOutOfScopeTestDirs().isPresent() && !getOutOfScopeTestDirs().get().isEmpty()) {
             builder.outOfScopeTestDirs(getOutOfScopeTestDirs().get());
@@ -1014,17 +948,13 @@ public abstract class AffectedTestTask extends DefaultTask {
      */
     static String describeEscalation(EscalationReason reason) {
         Objects.requireNonNull(reason, "reason");
-        // Phrases deliberately keep the legacy flag names ("runAllIfNoMatches=true",
-        // "runAllOnNonJavaChange=true") alongside the new situation-based name so
-        // existing CI greps stay matched. Removing either side would require a
-        // coordinated pipeline migration we do not want to force in Phase 1.
         return switch (reason) {
             case RUN_ALL_ON_NON_JAVA_CHANGE ->
-                    "runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff";
+                    "onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff";
             case RUN_ALL_ON_EMPTY_CHANGESET ->
-                    "runAllIfNoMatches=true / onEmptyDiff=FULL_SUITE — no changed files detected";
+                    "onEmptyDiff=FULL_SUITE — no changed files detected";
             case RUN_ALL_IF_NO_MATCHES ->
-                    "runAllIfNoMatches=true / onDiscoveryEmpty=FULL_SUITE — no affected tests discovered";
+                    "onDiscoveryEmpty=FULL_SUITE — no affected tests discovered";
             case RUN_ALL_ON_ALL_FILES_IGNORED ->
                     "onAllFilesIgnored=FULL_SUITE — every changed file matched ignorePaths";
             case RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE ->
@@ -1099,8 +1029,8 @@ public abstract class AffectedTestTask extends DefaultTask {
      *
      * <p>Every section names the source of the decision so an operator
      * can see at a glance whether the action came from an explicit
-     * {@code onXxx} setting, a legacy boolean, the mode default table,
-     * or the pre-v2 hardcoded baseline.
+     * {@code onXxx} setting or the mode default table (the v2 two-tier
+     * resolver has no other sources).
      *
      * <p>Package-private so {@code AffectedTestTaskExplainFormatTest}
      * can assert the format without spinning up Gradle.
@@ -1109,11 +1039,13 @@ public abstract class AffectedTestTask extends DefaultTask {
         List<String> lines = new ArrayList<>();
         lines.add("=== Affected Tests — decision trace (--explain) ===");
         lines.add("Base ref:        " + config.baseRef());
-        String configuredMode = config.mode() == null ? "unset" : config.mode().name();
-        // effectiveMode() is always non-null (see its Javadoc) — zero-config
-        // callers get the AUTO-detected value, identical to what an explicit
-        // `mode = "auto"` would have resolved to.
-        lines.add("Mode:            " + configuredMode
+        // config.mode() is guaranteed non-null in v2 (defaults to AUTO when
+        // the user doesn't set it), so we don't branch on null here — doing
+        // so would only re-introduce the pre-v2 "unset" rendering we
+        // deliberately dropped. effectiveMode() is also always non-null
+        // (zero-config callers get the AUTO-detected value, identical to
+        // what an explicit `mode = "auto"` would have resolved to).
+        lines.add("Mode:            " + config.mode().name()
                 + " (effective: " + config.effectiveMode().name() + ")");
         lines.add("Changed files:   " + result.changedFiles().size());
 
@@ -1288,10 +1220,8 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     private static String describeSource(ActionSource source) {
         return switch (source) {
-            case EXPLICIT          -> "explicit onXxx setting";
-            case LEGACY_BOOLEAN    -> "legacy boolean (runAllIfNoMatches / runAllOnNonJavaChange)";
-            case MODE_DEFAULT      -> "mode default";
-            case HARDCODED_DEFAULT -> "pre-v2 hardcoded default";
+            case EXPLICIT     -> "explicit onXxx setting";
+            case MODE_DEFAULT -> "mode default";
         };
     }
 
@@ -1311,22 +1241,16 @@ public abstract class AffectedTestTask extends DefaultTask {
      *
      * <p>Pluralisation is deliberately fixed to {@code file(s)} and
      * {@code class(es)} across every branch so CI greps stay stable
-     * across runs with different selection sizes. Every phrase that
-     * pre-v2 or Phase-1 CI pipelines grep for ({@code "running full
-     * suite"}, {@code "runAllIfNoMatches=true"}, {@code "no affected
-     * tests discovered"}, etc.) survives verbatim — this change adds
-     * the outcome/situation prefix without removing any existing
-     * vocabulary.
+     * across runs with different selection sizes.
      */
     static LogLine renderSummary(AffectedTestsResult result) {
         String prefix = "Affected Tests: " + result.action().name()
                 + " (" + result.situation().name() + ") — ";
         if (result.runAll()) {
-            // runAll branch keeps the pre-v2 "running full suite (reason)"
-            // wording verbatim so existing CI greps for that substring
-            // continue to match every FULL_SUITE run. Reason phrase is
-            // sourced from describeEscalation to avoid duplicating the
-            // legacy vocabulary across two files.
+            // The "running full suite (reason)" phrase is the single
+            // place the reason string shows up in the summary line.
+            // Reason phrase is sourced from describeEscalation to
+            // avoid duplicating the vocabulary across two files.
             return new LogLine(
                     prefix + "{} changed file(s); running full suite ({}).",
                     new Object[] {

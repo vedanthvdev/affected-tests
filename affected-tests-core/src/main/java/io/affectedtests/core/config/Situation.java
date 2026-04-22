@@ -35,10 +35,9 @@ public enum Situation {
     UNMAPPED_FILE,
 
     /**
-     * Every file in the diff matched {@link AffectedTestsConfig#ignorePaths()}
-     * (or the legacy {@code excludePaths} shim). Distinct from
-     * {@link #ALL_FILES_OUT_OF_SCOPE} so users can treat "purely docs changes"
-     * differently from "purely api-test changes".
+     * Every file in the diff matched {@link AffectedTestsConfig#ignorePaths()}.
+     * Distinct from {@link #ALL_FILES_OUT_OF_SCOPE} so users can treat
+     * "purely docs changes" differently from "purely api-test changes".
      */
     ALL_FILES_IGNORED,
 
@@ -83,12 +82,8 @@ public enum Situation {
      * <p>Defaults in the {@link AffectedTestsConfig} resolver are
      * conservative on purpose: {@link Mode#CI} and {@link Mode#STRICT}
      * escalate to {@link Action#FULL_SUITE}, {@link Mode#LOCAL} stays on
-     * {@link Action#SELECTED} (dev sees the WARN and decides), and the
-     * legacy {@code runAllIfNoMatches=true} shim also escalates — it is
-     * the closest existing boolean to "I don't trust a no-signal result".
-     * The hardcoded pre-v2 default is {@link Action#SELECTED} so
-     * zero-config callers upgrading from v1.9.21 do not experience a
-     * behaviour change.
+     * {@link Action#SELECTED} (dev sees the WARN and decides). Callers
+     * can override per-situation via {@code onDiscoveryIncomplete}.
      */
     DISCOVERY_INCOMPLETE,
 

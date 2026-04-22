@@ -2,7 +2,6 @@ package io.affectedtests.core.config;
 
 import io.affectedtests.core.util.LogSanitizer;
 
-import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -14,31 +13,21 @@ import java.util.Set;
  * Immutable value object — use the {@link Builder} to construct.
  *
  * <h2>v2 situation-based config</h2>
- * The legacy booleans {@code runAllIfNoMatches} and {@code runAllOnNonJavaChange}
- * remain supported for back-compat and map onto the v2
- * {@link Situation} / {@link Action} model via a translation shim in
- * {@link Builder#build()}:
+ * Every engine run produces exactly one {@link Situation}; each situation
+ * resolves to one {@link Action} ({@link Action#SELECTED},
+ * {@link Action#FULL_SUITE}, or {@link Action#SKIPPED}) via the priority
+ * ladder in {@link #actionFor(Situation)}:
  *
- * <ul>
- *   <li>{@code runAllIfNoMatches=true} &rarr; every "no affected tests" branch
- *       ({@link Situation#EMPTY_DIFF}, {@link Situation#ALL_FILES_IGNORED},
- *       {@link Situation#ALL_FILES_OUT_OF_SCOPE},
- *       {@link Situation#DISCOVERY_EMPTY}) escalates to {@link Action#FULL_SUITE}.</li>
- *   <li>{@code runAllIfNoMatches=false} &rarr; the same four branches resolve
- *       to {@link Action#SKIPPED} (i.e. run no tests), matching the pre-v2
- *       "silent no-op" behaviour when discovery turned up nothing.</li>
- *   <li>{@code runAllOnNonJavaChange=true} &rarr; {@link Situation#UNMAPPED_FILE}
- *       resolves to {@link Action#FULL_SUITE}.</li>
- *   <li>{@code runAllOnNonJavaChange=false} &rarr; {@link Situation#UNMAPPED_FILE}
- *       resolves to {@link Action#SELECTED}, meaning "treat the unmapped file
- *       as if it hadn't been there and continue to discovery". That matches
- *       the pre-v2 "silent skip on YAML" behaviour exactly.</li>
- *   <li>An explicit {@code onXxx()} call always wins over the legacy boolean
- *       translation, and the legacy boolean translation always wins over the
- *       {@link Mode}-based defaults. Users upgrading can therefore adopt the
- *       new DSL branch-by-branch without having to delete their legacy
- *       config in a single step.</li>
- * </ul>
+ * <ol>
+ *   <li>the caller's explicit {@code onXxx(Action)} setting, if any;</li>
+ *   <li>otherwise the per-{@link Mode} default
+ *       (CI / LOCAL / STRICT — AUTO auto-detects from the environment).</li>
+ * </ol>
+ *
+ * <p>v1's three legacy knobs ({@code runAllIfNoMatches},
+ * {@code runAllOnNonJavaChange}, {@code excludePaths}) were removed in
+ * v2.0. Callers upgrading from v1 should map them to the v2 DSL per the
+ * "Migrating from v1" section of the plugin README.
  */
 public final class AffectedTestsConfig {
 
@@ -51,8 +40,6 @@ public final class AffectedTestsConfig {
     private final String baseRef;
     private final boolean includeUncommitted;
     private final boolean includeStaged;
-    private final boolean runAllIfNoMatches;
-    private final boolean runAllOnNonJavaChange;
     private final Set<String> strategies;
     private final int transitiveDepth;
     private final List<String> testSuffixes;
@@ -68,7 +55,6 @@ public final class AffectedTestsConfig {
     private final Mode effectiveMode;
     private final Map<Situation, Action> situationActions;
     private final Map<Situation, ActionSource> situationActionSources;
-    private final List<String> deprecationWarnings;
 
     private AffectedTestsConfig(Builder builder) {
         this.baseRef = builder.baseRef;
@@ -87,17 +73,9 @@ public final class AffectedTestsConfig {
         // {@link Builder#gradlewTimeoutSeconds(long)}.
         this.gradlewTimeoutSeconds = builder.gradlewTimeoutSeconds;
 
-        // Resolve the paths-to-ignore list. Precedence matches the doc:
-        // explicit ignorePaths() > explicit excludePaths() > builder default.
-        List<String> resolvedIgnore;
-        if (builder.ignorePaths != null) {
-            resolvedIgnore = List.copyOf(builder.ignorePaths);
-        } else if (builder.excludePaths != null) {
-            resolvedIgnore = List.copyOf(builder.excludePaths);
-        } else {
-            resolvedIgnore = List.copyOf(Builder.DEFAULT_IGNORE_PATHS);
-        }
-        this.ignorePaths = resolvedIgnore;
+        this.ignorePaths = builder.ignorePaths != null
+                ? List.copyOf(builder.ignorePaths)
+                : List.copyOf(Builder.DEFAULT_IGNORE_PATHS);
 
         this.outOfScopeTestDirs = List.copyOf(
                 builder.outOfScopeTestDirs != null ? builder.outOfScopeTestDirs : List.of());
@@ -105,67 +83,11 @@ public final class AffectedTestsConfig {
                 builder.outOfScopeSourceDirs != null ? builder.outOfScopeSourceDirs : List.of());
 
         this.mode = builder.mode != null ? builder.mode : Mode.AUTO;
-        this.effectiveMode = resolveEffectiveMode(builder.mode);
-
-        // Keep the legacy getters literal — they return what the caller set,
-        // or the pre-v2 default if the caller never touched them. A
-        // "resolved view" that incorporated the new situation actions or
-        // mode detection would have been more accurate, but it would also
-        // flip the return value of {@code runAllIfNoMatches()} based on
-        // whether {@code CI} is set in the environment, which is exactly
-        // the kind of test-only determinism the pre-v2 API implicitly
-        // guaranteed. Engine code no longer consults these getters —
-        // see {@link #actionFor(Situation)}.
-        this.runAllIfNoMatches =
-                builder.runAllIfNoMatches != null ? builder.runAllIfNoMatches : false;
-        this.runAllOnNonJavaChange =
-                builder.runAllOnNonJavaChange != null ? builder.runAllOnNonJavaChange : true;
+        this.effectiveMode = resolveEffectiveMode(this.mode);
 
         ResolvedActions resolved = resolveSituationActions(builder, this.effectiveMode);
         this.situationActions = resolved.actions;
         this.situationActionSources = resolved.sources;
-
-        this.deprecationWarnings = buildDeprecationWarnings(builder);
-    }
-
-    /**
-     * Collects the list of human-readable deprecation warnings that the
-     * Gradle layer should surface for this build. One entry per legacy
-     * knob the caller explicitly touched — we detect "caller touched it"
-     * via the nullable backing field on the builder, so that zero-config
-     * users never see a warning even though their effective config still
-     * resolves through the legacy shim.
-     *
-     * <p>The returned list is in stable order (runAllIfNoMatches,
-     * runAllOnNonJavaChange, excludePaths) so log output is grep-stable
-     * across runs. Each message names the legacy knob, when it will be
-     * removed, and the v2 replacement — operators should be able to fix
-     * their config from the message alone without opening the docs.
-     */
-    private static List<String> buildDeprecationWarnings(Builder builder) {
-        List<String> warnings = new ArrayList<>(3);
-        if (builder.runAllIfNoMatches != null) {
-            warnings.add("[affected-tests] 'runAllIfNoMatches' is deprecated and will be "
-                    + "removed in v2.0.0. Replace it with per-situation actions "
-                    + "(onEmptyDiff / onAllFilesIgnored / onAllFilesOutOfScope / onDiscoveryEmpty), "
-                    + "each set to 'full_suite' to match runAllIfNoMatches=true, or 'skipped' "
-                    + "to match runAllIfNoMatches=false. See README.md section "
-                    + "'Migrating from v1 config'.");
-        }
-        if (builder.runAllOnNonJavaChange != null) {
-            warnings.add("[affected-tests] 'runAllOnNonJavaChange' is deprecated and will be "
-                    + "removed in v2.0.0. Replace it with 'onUnmappedFile' "
-                    + "(full_suite / selected / skipped). See README.md section "
-                    + "'Migrating from v1 config'.");
-        }
-        if (builder.excludePaths != null) {
-            warnings.add("[affected-tests] 'excludePaths' is deprecated and will be removed "
-                    + "in v2.0.0. Rename it to 'ignorePaths' — identical semantics, and "
-                    + "leaving it unset picks up the broader v2 default list "
-                    + "(markdown, generated/, licence/changelog, images). See README.md "
-                    + "section 'Migrating from v1 config'.");
-        }
-        return List.copyOf(warnings);
     }
 
     /** Parallel pair returned from the situation-action resolver. */
@@ -175,16 +97,14 @@ public final class AffectedTestsConfig {
     }
 
     /**
-     * Resolves the effective mode for action defaults. When the caller did
-     * not set a mode at all (null), we deliberately resolve to {@code null}
-     * here — the resolver downstream treats that as "fall through to the
-     * pre-v2 legacy-boolean defaults" instead of consulting a mode table.
-     * That keeps zero-config callers on the exact pre-v2 behaviour even
-     * when {@code $CI} happens to be set, which is what prevents the
-     * existing engine tests from going flaky on GitHub Actions runners.
+     * Resolves the configured {@link Mode} to the concrete profile whose
+     * defaults will be applied. {@link Mode#AUTO} probes the environment
+     * via {@link Builder#detectMode()}; every other mode passes through
+     * verbatim. Always returns one of {@link Mode#LOCAL},
+     * {@link Mode#CI}, or {@link Mode#STRICT} — never {@code null},
+     * never {@link Mode#AUTO}.
      */
     private static Mode resolveEffectiveMode(Mode configured) {
-        if (configured == null) return null;
         if (configured == Mode.AUTO) return Builder.detectMode();
         return configured;
     }
@@ -193,65 +113,23 @@ public final class AffectedTestsConfig {
      * Per-situation actions in strict priority order:
      * <ol>
      *   <li>the caller's explicit {@code on*} action,</li>
-     *   <li>the translation of whichever legacy boolean that situation
-     *       was historically driven by,</li>
-     *   <li>the per-mode default (only when the caller set an explicit
-     *       mode — {@code AUTO}/unset falls through to the final branch),</li>
-     *   <li>the hard-coded pre-v2 default, kept identical to the legacy
-     *       boolean defaults so zero-config callers continue to observe
-     *       pre-v2 behaviour exactly.</li>
+     *   <li>the per-mode default table (see {@link #defaultFor}).</li>
      * </ol>
+     *
+     * <p>{@link Situation#DISCOVERY_SUCCESS} is definitionally
+     * {@link Action#SELECTED} — there is no other sensible outcome when
+     * discovery returns tests, so the code fixes it rather than routing
+     * it through the resolver.
      */
     private static ResolvedActions resolveSituationActions(Builder b, Mode effectiveMode) {
-        Action legacyNoMatches = (b.runAllIfNoMatches == null)
-                ? null
-                : (b.runAllIfNoMatches ? Action.FULL_SUITE : Action.SKIPPED);
-        // runAllOnNonJavaChange=false historically meant "ignore the unmapped
-        // file and proceed with whatever Java the diff touched" — that is
-        // {@code SELECTED} in the v2 model, not {@code SKIPPED}. The latter
-        // would have regressed every pre-v2 caller that opted out of the
-        // safety net expecting discovery to still run.
-        Action legacyNonJava = (b.runAllOnNonJavaChange == null)
-                ? null
-                : (b.runAllOnNonJavaChange ? Action.FULL_SUITE : Action.SELECTED);
-
         EnumMap<Situation, Action> actions = new EnumMap<>(Situation.class);
         EnumMap<Situation, ActionSource> sources = new EnumMap<>(Situation.class);
-        resolveInto(actions, sources, Situation.EMPTY_DIFF,
-                b.onEmptyDiff, legacyNoMatches, effectiveMode, Action.SKIPPED);
-        resolveInto(actions, sources, Situation.ALL_FILES_IGNORED,
-                b.onAllFilesIgnored, legacyNoMatches, effectiveMode, Action.SKIPPED);
-        // No legacy boolean maps to ALL_FILES_OUT_OF_SCOPE — the concept
-        // did not exist pre-v2, so there is nothing to translate and the
-        // hard-coded fallback is {@code SKIPPED}.
-        resolveInto(actions, sources, Situation.ALL_FILES_OUT_OF_SCOPE,
-                b.onAllFilesOutOfScope, null, effectiveMode, Action.SKIPPED);
-        resolveInto(actions, sources, Situation.UNMAPPED_FILE,
-                b.onUnmappedFile, legacyNonJava, effectiveMode, Action.FULL_SUITE);
-        resolveInto(actions, sources, Situation.DISCOVERY_EMPTY,
-                b.onDiscoveryEmpty, legacyNoMatches, effectiveMode, Action.SKIPPED);
-        // No legacy boolean maps to DISCOVERY_INCOMPLETE — the situation
-        // did not exist pre-v1.9.22, so there is nothing to translate
-        // and there is no pre-v2 behaviour to preserve. Wiring the
-        // {@code runAllIfNoMatches} shim in here would silently fight
-        // the CI / STRICT safety-net guarantee documented in the
-        // {@link Situation#DISCOVERY_INCOMPLETE} javadoc: a user who
-        // set {@code mode=CI} plus {@code runAllIfNoMatches=false}
-        // would get SKIPPED on parse failures, which is the opposite
-        // of what the doc promises. The hard-coded fallback is
-        // {@link Action#SELECTED}, matching the LOCAL-mode default
-        // and mirroring the {@link Situation#ALL_FILES_OUT_OF_SCOPE}
-        // wiring (another v2-only situation that passes {@code null}
-        // for the legacy argument).
-        resolveInto(actions, sources, Situation.DISCOVERY_INCOMPLETE,
-                b.onDiscoveryIncomplete, null, effectiveMode, Action.SELECTED);
-        // DISCOVERY_SUCCESS is definitionally SELECTED — there is no
-        // other sensible outcome when discovery returns tests. Making
-        // it configurable would let users set "discovery ran, found
-        // tests, now run nothing", which is never what anyone wants.
-        // It is reported as EXPLICIT in the source map because that's
-        // the honest answer — the code fixes it rather than choosing a
-        // default that someone could override.
+        resolveInto(actions, sources, Situation.EMPTY_DIFF, b.onEmptyDiff, effectiveMode);
+        resolveInto(actions, sources, Situation.ALL_FILES_IGNORED, b.onAllFilesIgnored, effectiveMode);
+        resolveInto(actions, sources, Situation.ALL_FILES_OUT_OF_SCOPE, b.onAllFilesOutOfScope, effectiveMode);
+        resolveInto(actions, sources, Situation.UNMAPPED_FILE, b.onUnmappedFile, effectiveMode);
+        resolveInto(actions, sources, Situation.DISCOVERY_EMPTY, b.onDiscoveryEmpty, effectiveMode);
+        resolveInto(actions, sources, Situation.DISCOVERY_INCOMPLETE, b.onDiscoveryIncomplete, effectiveMode);
         actions.put(Situation.DISCOVERY_SUCCESS, Action.SELECTED);
         sources.put(Situation.DISCOVERY_SUCCESS, ActionSource.EXPLICIT);
         return new ResolvedActions(Map.copyOf(actions), Map.copyOf(sources));
@@ -261,33 +139,18 @@ public final class AffectedTestsConfig {
                                     EnumMap<Situation, ActionSource> sources,
                                     Situation s,
                                     Action explicit,
-                                    Action legacy,
-                                    Mode effectiveMode,
-                                    Action preV2Default) {
+                                    Mode effectiveMode) {
         if (explicit != null) {
             actions.put(s, explicit);
             sources.put(s, ActionSource.EXPLICIT);
             return;
         }
-        if (legacy != null) {
-            actions.put(s, legacy);
-            sources.put(s, ActionSource.LEGACY_BOOLEAN);
-            return;
-        }
-        if (effectiveMode != null) {
-            actions.put(s, defaultFor(s, effectiveMode));
-            sources.put(s, ActionSource.MODE_DEFAULT);
-            return;
-        }
-        actions.put(s, preV2Default);
-        sources.put(s, ActionSource.HARDCODED_DEFAULT);
+        actions.put(s, defaultFor(s, effectiveMode));
+        sources.put(s, ActionSource.MODE_DEFAULT);
     }
 
     /**
      * Per-mode defaults (see {@link Mode} javadoc for the full table).
-     * Only invoked when the caller set an explicit mode — {@code AUTO}
-     * without any legacy override falls through to the pre-v2 defaults
-     * instead.
      */
     private static Action defaultFor(Situation s, Mode effectiveMode) {
         return switch (effectiveMode) {
@@ -325,21 +188,6 @@ public final class AffectedTestsConfig {
     public String baseRef() { return baseRef; }
     public boolean includeUncommitted() { return includeUncommitted; }
     public boolean includeStaged() { return includeStaged; }
-    public boolean runAllIfNoMatches() { return runAllIfNoMatches; }
-
-    /**
-     * Whether to force a full test run whenever the change set contains any
-     * file that cannot be resolved to a Java class under the configured
-     * {@link #sourceDirs()} or {@link #testDirs()} — for example
-     * {@code application.yml}, {@code build.gradle}, a Liquibase changelog,
-     * or a logback config. Files matching {@link #ignorePaths()} are
-     * treated as an explicit opt-out and do not trigger the escalation.
-     *
-     * <p>Default: {@code true} — "run more, never run less".
-     *
-     * @return the run-all-on-non-java-change property
-     */
-    public boolean runAllOnNonJavaChange() { return runAllOnNonJavaChange; }
     public Set<String> strategies() { return strategies; }
     public int transitiveDepth() { return transitiveDepth; }
     public List<String> testSuffixes() { return testSuffixes; }
@@ -383,17 +231,6 @@ public final class AffectedTestsConfig {
     public List<String> ignorePaths() { return ignorePaths; }
 
     /**
-     * Back-compat alias for {@link #ignorePaths()}. Returns the same list —
-     * v2 collapsed the two legacy names into a single effective list so
-     * downstream code never has to consult both.
-     *
-     * @return the effective ignore paths list (identical to {@link #ignorePaths()})
-     * @deprecated use {@link #ignorePaths()} in new code; both return the same value.
-     */
-    @Deprecated
-    public List<String> excludePaths() { return ignorePaths; }
-
-    /**
      * Test source directories (e.g. {@code api-test/src/test/java}) that the
      * plugin must not resolve as in-scope tests. A diff consisting entirely
      * of files under these directories routes through
@@ -428,32 +265,16 @@ public final class AffectedTestsConfig {
     /**
      * The mode after {@link Mode#AUTO} resolution. Always returns one of
      * {@link Mode#LOCAL}, {@link Mode#CI} or {@link Mode#STRICT} — never
-     * {@code null}.
+     * {@code null}, never {@link Mode#AUTO}.
      *
-     * <p>When the caller did not configure a mode at all, the internal
-     * situation-action resolver deliberately falls through to pre-v2
-     * hardcoded defaults (preserving zero-config behaviour parity with
-     * the legacy API). The public getter still reports the mode that
-     * {@code AUTO} would have selected — either the value detected from
-     * the environment, or {@link Mode#LOCAL} when detection finds no
-     * CI markers — so callers reading this value get a concrete Mode
-     * that accurately describes the execution environment.
-     *
-     * @return the resolved mode, never {@code null}
+     * @return the resolved mode
      */
-    public Mode effectiveMode() {
-        // Honest fallback for the "caller passed nothing, we stayed on
-        // pre-v2 defaults" branch — resolve via the same AUTO-detection
-        // path the builder would have taken. Keeps the public contract
-        // non-null without destabilising the resolver, which reads the
-        // nullable internal field directly.
-        return effectiveMode != null ? effectiveMode : Builder.detectMode();
-    }
+    public Mode effectiveMode() { return effectiveMode; }
 
     /**
      * The {@link Action} the engine will take for a given {@link Situation}.
-     * Produced by layering the explicit caller-set action (highest priority),
-     * then the legacy-boolean translation, then the mode default.
+     * Produced by layering the explicit caller-set action (highest priority)
+     * over the {@link Mode} default.
      *
      * @param situation the situation to resolve
      * @return the configured action for {@code situation}
@@ -474,8 +295,7 @@ public final class AffectedTestsConfig {
     /**
      * The {@link ActionSource} that picked the {@link Action} for a given
      * {@link Situation}. Used by {@code --explain} so operators can tell
-     * whether an outcome came from an explicit setting, a legacy boolean,
-     * a mode default, or the pre-v2 hardcoded baseline.
+     * whether an outcome came from an explicit setting or a mode default.
      *
      * @param situation the situation to resolve
      * @return the source tier that produced {@link #actionFor(Situation)}
@@ -494,18 +314,6 @@ public final class AffectedTestsConfig {
      */
     public Map<Situation, ActionSource> situationActionSources() { return situationActionSources; }
 
-    /**
-     * Human-readable deprecation warnings the caller should surface to
-     * its users (for the Gradle plugin: via {@code Logger.warn}). Empty
-     * when the caller only uses v2 knobs. One entry per legacy setter
-     * that was explicitly invoked — callers that rely on the pre-v2
-     * defaults (zero config) get zero warnings.
-     *
-     * @return an unmodifiable list of warning strings; empty when the
-     *         config was built without touching any legacy setter
-     */
-    public List<String> deprecationWarnings() { return deprecationWarnings; }
-
     /** Creates a builder with sensible defaults. */
     public static Builder builder() {
         return new Builder();
@@ -514,8 +322,8 @@ public final class AffectedTestsConfig {
     public static final class Builder {
 
         /**
-         * Default list of paths that must never influence test selection —
-         * wider than the pre-v2 default ({@code ["**}{@code /generated/**"]})
+         * Default list of paths that must never influence test selection.
+         * Broader than the pre-v2 default ({@code ["**}{@code /generated/**"]})
          * so markdown-only PRs don't sneak past ignore rules on zero-config
          * installs.
          */
@@ -552,8 +360,6 @@ public final class AffectedTestsConfig {
         // want WIP to expand the diff opt in via {@code includeUncommitted(true)}.
         private boolean includeUncommitted = false;
         private boolean includeStaged = false;
-        private Boolean runAllIfNoMatches;
-        private Boolean runAllOnNonJavaChange;
         private Set<String> strategies = Set.of(STRATEGY_NAMING, STRATEGY_USAGE, STRATEGY_IMPL, STRATEGY_TRANSITIVE);
         // 4 matches the v2 design: most real-world ctrl -> svc -> repo ->
         // mapper chains are 2-3 deep, so 4 leaves headroom without
@@ -564,7 +370,6 @@ public final class AffectedTestsConfig {
         private List<String> sourceDirs = List.of("src/main/java");
         private List<String> testDirs = List.of("src/test/java");
         private List<String> ignorePaths;
-        private List<String> excludePaths;
         private List<String> outOfScopeTestDirs;
         private List<String> outOfScopeSourceDirs;
         private boolean includeImplementationTests = true;
@@ -700,8 +505,6 @@ public final class AffectedTestsConfig {
         }
         public Builder includeUncommitted(boolean v) { this.includeUncommitted = v; return this; }
         public Builder includeStaged(boolean v) { this.includeStaged = v; return this; }
-        public Builder runAllIfNoMatches(boolean v) { this.runAllIfNoMatches = v; return this; }
-        public Builder runAllOnNonJavaChange(boolean v) { this.runAllOnNonJavaChange = v; return this; }
         public Builder strategies(Set<String> v) {
             this.strategies = Objects.requireNonNull(v, "strategies must not be null");
             return this;
@@ -717,20 +520,6 @@ public final class AffectedTestsConfig {
         }
         public Builder testDirs(List<String> v) {
             this.testDirs = Objects.requireNonNull(v, "testDirs must not be null");
-            return this;
-        }
-
-        /**
-         * Back-compat alias for {@link #ignorePaths(List)}. If both are set,
-         * {@link #ignorePaths(List)} wins.
-         *
-         * @param v the exclude paths
-         * @return this builder
-         * @deprecated prefer {@link #ignorePaths(List)} for new code.
-         */
-        @Deprecated
-        public Builder excludePaths(List<String> v) {
-            this.excludePaths = Objects.requireNonNull(v, "excludePaths must not be null");
             return this;
         }
 

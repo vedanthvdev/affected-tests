@@ -49,19 +49,19 @@ public final class AffectedTestsEngine {
 
     /**
      * Why a result flipped to {@code runAll = true}, or {@link #NONE} when no
-     * escalation occurred. Preserved as a v1 back-compat surface so that
-     * existing Gradle-task callers keep receiving the same reason codes —
-     * the v2 engine now records a richer {@link Situation}/{@link Action}
-     * pair internally and derives the legacy code from them.
+     * escalation occurred. Derived one-for-one from the
+     * {@link Situation}/{@link Action} pair the engine resolved, and
+     * surfaced on the result record so Gradle-task log formatting and
+     * {@code --explain} can describe the escalation without re-deriving
+     * the mapping.
      */
     public enum EscalationReason {
         /** No escalation — either a filtered selection or a plain "nothing to do" result. */
         NONE,
         /**
          * Git produced an empty change set (no files differ between
-         * {@code baseRef} and the working tree) and {@code runAllIfNoMatches}
-         * was true. Derived from {@link Situation#EMPTY_DIFF} +
-         * {@link Action#FULL_SUITE}.
+         * {@code baseRef} and the working tree) and the action for
+         * {@link Situation#EMPTY_DIFF} resolved to {@link Action#FULL_SUITE}.
          */
         RUN_ALL_ON_EMPTY_CHANGESET,
         /**
@@ -80,8 +80,7 @@ public final class AffectedTestsEngine {
         /**
          * Every file in the diff matched {@link AffectedTestsConfig#ignorePaths()}
          * and the action for {@link Situation#ALL_FILES_IGNORED} resolved
-         * to {@link Action#FULL_SUITE}. v2-only — no legacy boolean
-         * produces this code.
+         * to {@link Action#FULL_SUITE}.
          */
         RUN_ALL_ON_ALL_FILES_IGNORED,
         /**
@@ -89,7 +88,7 @@ public final class AffectedTestsEngine {
          * {@link AffectedTestsConfig#outOfScopeTestDirs()} or
          * {@link AffectedTestsConfig#outOfScopeSourceDirs()} and the
          * action for {@link Situation#ALL_FILES_OUT_OF_SCOPE} resolved to
-         * {@link Action#FULL_SUITE}. v2-only.
+         * {@link Action#FULL_SUITE}.
          */
         RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE,
         /**
@@ -98,8 +97,7 @@ public final class AffectedTestsEngine {
          * so discovery may have under-reported its selection. The action
          * for {@link Situation#DISCOVERY_INCOMPLETE} resolved to
          * {@link Action#FULL_SUITE}, typically via {@link io.affectedtests.core.config.Mode#CI}
-         * or {@link io.affectedtests.core.config.Mode#STRICT} defaults
-         * or an explicit {@code runAllIfNoMatches=true}. v2-only.
+         * or {@link io.affectedtests.core.config.Mode#STRICT} defaults.
          */
         RUN_ALL_ON_DISCOVERY_INCOMPLETE
     }
@@ -163,9 +161,9 @@ public final class AffectedTestsEngine {
      * @param action                   the resolved {@link Action} for
      *                                 {@link #situation}; one of SELECTED,
      *                                 FULL_SUITE, SKIPPED
-     * @param escalationReason         legacy reason code kept in sync with
-     *                                 {@link #situation}/{@link #action} for
-     *                                 v1 callers; see {@link EscalationReason}
+     * @param escalationReason         reason code derived from the
+     *                                 {@link #situation}/{@link #action}
+     *                                 pair; see {@link EscalationReason}
      */
     public record AffectedTestsResult(
             Set<String> testClassFqns,
@@ -243,11 +241,11 @@ public final class AffectedTestsEngine {
         // Pre-fix, this slid through to discovery with empty
         // {@code productionClasses} and {@code testClasses}, every
         // strategy returned empty, and the engine escalated via
-        // {@link Situation#DISCOVERY_EMPTY} — which under the default
-        // {@code runAllIfNoMatches=true} routed to {@code FULL_SUITE}.
-        // The result: a pure "docs + api-test" MR ran the whole unit
-        // suite despite the user having told the plugin "these dirs
-        // don't influence tests". Routing to {@link Situation#ALL_FILES_OUT_OF_SCOPE}
+        // {@link Situation#DISCOVERY_EMPTY} — which under the CI
+        // default routed to {@code FULL_SUITE}. The result: a pure
+        // "docs + api-test" MR ran the whole unit suite despite the
+        // user having told the plugin "these dirs don't influence
+        // tests". Routing to {@link Situation#ALL_FILES_OUT_OF_SCOPE}
         // instead lets {@code onAllFilesOutOfScope} (the stronger
         // operator signal when both signals disagree) decide, which
         // defaults to {@link Action#SKIPPED} in every built-in mode.
@@ -272,10 +270,8 @@ public final class AffectedTestsEngine {
                     mapping.unmappedChangedFiles().size(), action, examples);
             // SELECTED here means "ignore the unmapped file, proceed with
             // discovery on whatever production/test files were in the
-            // diff" — this is the behaviour legacy
-            // {@code runAllOnNonJavaChange=false} callers expect, and the
-            // only way to express it in the v2 model without inventing a
-            // second fallthrough enum value.
+            // diff" — the opt-out for operators who don't want
+            // non-Java changes to escalate to a full suite.
             if (action != Action.SELECTED) {
                 return emptyResult(Situation.UNMAPPED_FILE, action, changedFiles,
                         mapping.productionClasses(), mapping.testClasses(), buckets);
@@ -412,8 +408,7 @@ public final class AffectedTestsEngine {
      * <p>When {@link Situation#UNMAPPED_FILE} resolves to
      * {@link Action#SELECTED} the engine deliberately does <em>not</em>
      * route through here — it continues into discovery so the diff's
-     * Java files still get analysed, matching the pre-v2 behaviour of
-     * {@code runAllOnNonJavaChange=false}.
+     * Java files still get analysed.
      */
     private AffectedTestsResult resolveAmbiguous(Situation situation,
                                                  Set<String> changedFiles,
@@ -455,11 +450,11 @@ public final class AffectedTestsEngine {
                 skipped,
                 situation,
                 action,
-                legacyReason(situation, action)
+                escalationReason(situation, action)
         );
     }
 
-    private static EscalationReason legacyReason(Situation situation, Action action) {
+    private static EscalationReason escalationReason(Situation situation, Action action) {
         if (action != Action.FULL_SUITE) return EscalationReason.NONE;
         return switch (situation) {
             case EMPTY_DIFF -> EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET;

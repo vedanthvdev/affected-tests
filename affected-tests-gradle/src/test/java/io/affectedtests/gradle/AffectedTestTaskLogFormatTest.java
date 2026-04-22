@@ -223,16 +223,16 @@ class AffectedTestTaskLogFormatTest {
         assertTrue(summary.contains("running full suite"),
                 "A runAll summary must tell the reader we're running the full suite — not the "
                         + "non-runAll count-based line that would say '0 production class(es), 0 test class(es) affected'");
-        assertTrue(summary.contains("runAllOnNonJavaChange=true"),
+        assertTrue(summary.contains("onUnmappedFile=FULL_SUITE"),
                 "The real trigger must appear in the log or the message defeats its own purpose");
         assertTrue(summary.contains("non-Java or unmapped"),
-                "Render must explain what runAllOnNonJavaChange actually detected, not just name the flag");
+                "Render must explain what onUnmappedFile actually detected, not just name the knob");
     }
 
     @Test
     void emptyChangesetEscalationNamesItsOwnTrigger() {
         // Guards the bug the prior amendment still carried: empty changeset +
-        // runAllIfNoMatches shared the "no affected tests discovered" phrase
+        // onEmptyDiff=FULL_SUITE shared the "no affected tests discovered" phrase
         // with the post-discovery empty branch, even though discovery had
         // never actually run. The two branches must produce distinct phrases.
         AffectedTestsResult result = new AffectedTestsResult(
@@ -251,8 +251,8 @@ class AffectedTestTaskLogFormatTest {
         String summary = render(AffectedTestTask.renderSummary(result));
 
         assertTrue(summary.contains("running full suite"));
-        assertTrue(summary.contains("runAllIfNoMatches=true"),
-                "Empty-changeset escalation is driven by runAllIfNoMatches, so the flag name "
+        assertTrue(summary.contains("onEmptyDiff=FULL_SUITE"),
+                "Empty-changeset escalation is driven by onEmptyDiff, so the knob name "
                         + "must surface in the log the same way it does in the config DSL");
         assertTrue(summary.contains("no changed files"),
                 "Phrase must say why we escalated — nothing had changed — instead of claiming "
@@ -277,7 +277,7 @@ class AffectedTestTaskLogFormatTest {
         String summary = render(AffectedTestTask.renderSummary(result));
 
         assertTrue(summary.contains("running full suite"));
-        assertTrue(summary.contains("runAllIfNoMatches=true"));
+        assertTrue(summary.contains("onDiscoveryEmpty=FULL_SUITE"));
         assertTrue(summary.contains("no affected tests discovered"),
                 "Post-discovery empty must say discovery ran and returned nothing, so the "
                         + "reader can distinguish this case from the empty-changeset one");

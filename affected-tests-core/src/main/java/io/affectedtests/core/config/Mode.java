@@ -8,24 +8,21 @@ package io.affectedtests.core.config;
  * {@link #LOCAL} or {@link #CI} based on the usual CI env vars; every other
  * mode is an explicit opt-in and its defaults are applied verbatim.
  *
- * <p>Defaults per mode (used only when the caller has set neither the
- * specific situation action nor the legacy boolean that would translate to
- * it):
+ * <p>Defaults per mode (used only when the caller has not set the
+ * specific {@code onXxx} situation action):
  *
  * <table>
  *   <caption>Per-mode action defaults</caption>
- *   <tr><th></th><th>EMPTY_DIFF</th><th>ALL_IGNORED</th><th>ALL_OUT_OF_SCOPE</th><th>UNMAPPED_FILE</th><th>DISCOVERY_EMPTY</th></tr>
- *   <tr><td>LOCAL</td><td>SKIPPED</td><td>SKIPPED</td><td>SKIPPED</td><td>FULL_SUITE</td><td>SKIPPED</td></tr>
- *   <tr><td>CI</td><td>SKIPPED</td><td>SKIPPED</td><td>SKIPPED</td><td>FULL_SUITE</td><td>FULL_SUITE</td></tr>
- *   <tr><td>STRICT</td><td>FULL_SUITE</td><td>FULL_SUITE</td><td>SKIPPED</td><td>FULL_SUITE</td><td>FULL_SUITE</td></tr>
+ *   <tr><th></th><th>EMPTY_DIFF</th><th>ALL_IGNORED</th><th>ALL_OUT_OF_SCOPE</th><th>UNMAPPED_FILE</th><th>DISCOVERY_EMPTY</th><th>DISCOVERY_INCOMPLETE</th></tr>
+ *   <tr><td>LOCAL</td><td>SKIPPED</td><td>SKIPPED</td><td>SKIPPED</td><td>FULL_SUITE</td><td>SKIPPED</td><td>SELECTED</td></tr>
+ *   <tr><td>CI</td><td>SKIPPED</td><td>SKIPPED</td><td>SKIPPED</td><td>FULL_SUITE</td><td>FULL_SUITE</td><td>FULL_SUITE</td></tr>
+ *   <tr><td>STRICT</td><td>FULL_SUITE</td><td>FULL_SUITE</td><td>SKIPPED</td><td>FULL_SUITE</td><td>FULL_SUITE</td><td>FULL_SUITE</td></tr>
  * </table>
  *
- * <p>The pre-v2 zero-config baseline was
- * {@code runAllIfNoMatches=false}, {@code runAllOnNonJavaChange=true}
- * — which lines up exactly with the {@link #LOCAL} column above. The
- * {@link #CI} profile adds the {@code DISCOVERY_EMPTY=FULL_SUITE}
- * safety net on top of that so zero-config users who land in a CI
- * environment get the safer default without having to opt in.
+ * <p>Zero-config installs land on {@link #AUTO} and therefore get either
+ * the LOCAL or CI column based on whether the usual CI env vars are
+ * set. {@link #STRICT} tightens the CI column further for users that
+ * want ambiguity to always escalate to a full suite.
  */
 public enum Mode {
     /** Detect CI vs. local at build() time based on common CI env vars. */
