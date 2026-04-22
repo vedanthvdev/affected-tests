@@ -140,9 +140,15 @@ public final class PathToClassMapper {
             // {@code ignorePaths} entry is a contract that nothing about
             // the file should influence the engine, including nudging it
             // into the out-of-scope bucket.
+            // All {@code filePath} values below originate from the git
+            // diff against an attacker-controllable MR branch, so every
+            // log site routes through {@link LogSanitizer}. Even
+            // DEBUG-level sites are worth sanitising because operators
+            // bumping to DEBUG to investigate incidents is exactly when
+            // log-forgery escalation is most likely to matter.
             if (isIgnored(filePath)) {
                 ignoredFiles.add(filePath);
-                log.debug("Ignored by pattern: {}", filePath);
+                log.debug("Ignored by pattern: {}", LogSanitizer.sanitize(filePath));
                 continue;
             }
 
@@ -154,12 +160,12 @@ public final class PathToClassMapper {
             if (matchesAny(filePath, outOfScopeSourceMatchers)
                     || matchesAny(filePath, outOfScopeTestMatchers)) {
                 outOfScopeFiles.add(filePath);
-                log.debug("Out-of-scope: {}", filePath);
+                log.debug("Out-of-scope: {}", LogSanitizer.sanitize(filePath));
                 continue;
             }
 
             if (!filePath.endsWith(".java")) {
-                log.debug("Non-Java file flagged as unmapped: {}", filePath);
+                log.debug("Non-Java file flagged as unmapped: {}", LogSanitizer.sanitize(filePath));
                 unmappedChangedFiles.add(filePath);
                 continue;
             }
@@ -178,7 +184,9 @@ public final class PathToClassMapper {
             // safety net decide (FULL_SUITE in CI mode by default).
             String fileName = extractFileName(filePath);
             if ("module-info.java".equals(fileName) || "package-info.java".equals(fileName)) {
-                log.debug("Java marker file ({}) flagged as unmapped: {}", fileName, filePath);
+                log.debug("Java marker file ({}) flagged as unmapped: {}",
+                        LogSanitizer.sanitize(fileName),
+                        LogSanitizer.sanitize(filePath));
                 unmappedChangedFiles.add(filePath);
                 continue;
             }
@@ -187,7 +195,9 @@ public final class PathToClassMapper {
             if (testFqn != null) {
                 testClasses.add(testFqn);
                 changedTestFiles.add(filePath);
-                log.debug("Mapped test file: {} → {}", filePath, testFqn);
+                log.debug("Mapped test file: {} → {}",
+                        LogSanitizer.sanitize(filePath),
+                        LogSanitizer.sanitize(testFqn));
                 continue;
             }
 
@@ -195,13 +205,16 @@ public final class PathToClassMapper {
             if (prodFqn != null) {
                 productionClasses.add(prodFqn);
                 changedProductionFiles.add(filePath);
-                log.debug("Mapped production file: {} → {}", filePath, prodFqn);
+                log.debug("Mapped production file: {} → {}",
+                        LogSanitizer.sanitize(filePath),
+                        LogSanitizer.sanitize(prodFqn));
                 continue;
             }
 
             // A .java file outside the configured source/test dirs — still
             // unmappable, still a potential safety escalation trigger.
-            log.debug("Java file outside configured source/test dirs flagged as unmapped: {}", filePath);
+            log.debug("Java file outside configured source/test dirs flagged as unmapped: {}",
+                    LogSanitizer.sanitize(filePath));
             unmappedChangedFiles.add(filePath);
         }
 
@@ -288,7 +301,9 @@ public final class PathToClassMapper {
             // the engine routes it through the unmapped bucket and the
             // safety net picks up the oddity, rather than blowing up
             // the whole task with an unhandled InvalidPathException.
-            log.debug("Ignore check skipped for unparseable path {}: {}", filePath, e.getMessage());
+            log.debug("Ignore check skipped for unparseable path {}: {}",
+                    LogSanitizer.sanitize(filePath),
+                    LogSanitizer.sanitize(e.getMessage()));
             return false;
         }
         for (PathMatcher matcher : ignoreMatchers) {

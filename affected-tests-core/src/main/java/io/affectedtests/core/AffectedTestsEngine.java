@@ -311,7 +311,12 @@ public final class AffectedTestsEngine {
                 allTestsToRun.add(fqn);
                 fqnToPath.put(fqn, file);
             } else {
-                log.debug("Skipping FQN with no matching test file on disk: {}", fqn);
+                // The FQN reached this log site via the discovery
+                // strategies, which derive names from diff paths and
+                // from the scanned source tree — both attacker-
+                // influenced on a merge-gate run.
+                log.debug("Skipping FQN with no matching test file on disk: {}",
+                        LogSanitizer.sanitize(fqn));
             }
         }
 

@@ -1,5 +1,6 @@
 package io.affectedtests.core.discovery;
 
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,20 +54,65 @@ public final class SourceFileScanner {
     /**
      * Recursively collects all {@code .java} files under {@code dir},
      * appending them to the provided list.
+     *
+     * <p>Symlinks, at either the directory or file level, are never
+     * followed or added to the result. The directory-level
+     * containment check in {@link #findAllMatchingDirs} already
+     * rejects {@code src/main/java -> /} planted by an attacker MR,
+     * but a more subtle attack — committing
+     * {@code src/main/java/com/x/Leak.java -> /etc/passwd} — slid
+     * past that guard and the file would then be parsed by
+     * JavaParser, with its contents potentially surfaced in
+     * {@code --explain} samples or in parse-failure WARN output. The
+     * in-visitor {@link BasicFileAttributes#isSymbolicLink()} check
+     * closes that hole. This is deliberately stricter than the
+     * directory-level containment check: we reject <em>every</em>
+     * file-level symlink unconditionally, even intra-repo ones whose
+     * real path stays inside the project tree. The rationale is
+     * cost/benefit — a per-file {@code toRealPath} call on every
+     * {@code .java} entry would add a syscall to the hot path for
+     * negligible benefit, and the usability cost of dropping
+     * intra-repo file symlinks is low (Git doesn't preserve hard
+     * links across clone either, so tooling that relies on
+     * canonical-reference aliasing already has to handle the "regular
+     * file" case). Projects that currently commit file-level symlinks
+     * for tooling reasons will see them silently ignored by
+     * discovery.
+     *
+     * <p>A per-subtree {@link IOException} (permission denied on one
+     * nested directory) is logged and swallowed so the scan
+     * continues; before v1.9.21 the default {@link SimpleFileVisitor}
+     * rethrew and the outer catch truncated the walk silently — any
+     * readable siblings of the unreadable subtree vanished from
+     * discovery without any signal to the operator.
      */
     public static void collectJavaFiles(Path dir, List<Path> result) {
         try {
             Files.walkFileTree(dir, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (attrs.isSymbolicLink()) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     if (file.toString().endsWith(".java")) {
                         result.add(file);
                     }
                     return FileVisitResult.CONTINUE;
                 }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    log.warn("Affected Tests: skipping unreadable entry {} under {}: {}",
+                            LogSanitizer.sanitize(String.valueOf(file)),
+                            LogSanitizer.sanitize(String.valueOf(dir)),
+                            LogSanitizer.sanitize(exc.getMessage()));
+                    return FileVisitResult.CONTINUE;
+                }
             });
         } catch (IOException e) {
-            log.warn("Error collecting Java files from {}: {}", dir, e.getMessage());
+            log.warn("Affected Tests: error collecting Java files from {}: {}",
+                    LogSanitizer.sanitize(String.valueOf(dir)),
+                    LogSanitizer.sanitize(e.getMessage()));
         }
     }
 
@@ -154,6 +200,15 @@ public final class SourceFileScanner {
             Files.walkFileTree(sourceRoot, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    // Same symlink + containment contract as
+                    // collectJavaFiles: file symlinks are never walked
+                    // because the real path can escape the project
+                    // root (DoS + data-exfiltration surface when the
+                    // plugin runs on merge-gate CI against an
+                    // attacker-influenced branch).
+                    if (attrs.isSymbolicLink()) {
+                        return FileVisitResult.CONTINUE;
+                    }
                     if (file.toString().endsWith(".java")) {
                         Path relative = sourceRoot.relativize(file);
                         String fqn = relative.toString()
@@ -166,9 +221,20 @@ public final class SourceFileScanner {
                     }
                     return FileVisitResult.CONTINUE;
                 }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    log.warn("Affected Tests: skipping unreadable entry {} under {}: {}",
+                            LogSanitizer.sanitize(String.valueOf(file)),
+                            LogSanitizer.sanitize(String.valueOf(sourceRoot)),
+                            LogSanitizer.sanitize(exc.getMessage()));
+                    return FileVisitResult.CONTINUE;
+                }
             });
         } catch (IOException e) {
-            log.warn("Error scanning directory {}: {}", sourceRoot, e.getMessage());
+            log.warn("Affected Tests: error scanning directory {}: {}",
+                    LogSanitizer.sanitize(String.valueOf(sourceRoot)),
+                    LogSanitizer.sanitize(e.getMessage()));
         }
     }
 
@@ -290,12 +356,38 @@ public final class SourceFileScanner {
 
                     return FileVisitResult.CONTINUE;
                 }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    // Per-subtree permission / race errors must not
+                    // truncate the entire module discovery walk. Pre-
+                    // v1.9.21 the default SimpleFileVisitor rethrew
+                    // here and the outer catch swallowed the whole
+                    // remaining walk — any modules living next to an
+                    // unreadable subtree were silently invisible.
+                    log.warn("Affected Tests: skipping unreadable entry {} under {}: {}",
+                            LogSanitizer.sanitize(String.valueOf(file)),
+                            LogSanitizer.sanitize(String.valueOf(projectDir)),
+                            LogSanitizer.sanitize(exc.getMessage()));
+                    return FileVisitResult.CONTINUE;
+                }
             });
         } catch (IOException e) {
-            log.warn("Error searching for '{}' under {}: {}", relativeDir, projectDir, e.getMessage());
+            log.warn("Affected Tests: error searching for '{}' under {}: {}",
+                    LogSanitizer.sanitize(relativeDir),
+                    LogSanitizer.sanitize(String.valueOf(projectDir)),
+                    LogSanitizer.sanitize(e.getMessage()));
         }
 
-        log.debug("Found {} directories matching '{}' under {}", matches.size(), relativeDir, projectDir);
+        // relativeDir and projectDir are Gradle-config-sourced and trusted by
+        // our threat model, but sanitising at DEBUG too keeps the log-forgery
+        // contract uniform across every visibility level and matches the WARN
+        // path a few lines up. One less thing for a future contributor to get
+        // subtly wrong.
+        log.debug("Found {} directories matching '{}' under {}",
+                matches.size(),
+                LogSanitizer.sanitize(relativeDir),
+                LogSanitizer.sanitize(String.valueOf(projectDir)));
         return matches;
     }
 

@@ -1,5 +1,7 @@
 package io.affectedtests.core.config;
 
+import io.affectedtests.core.util.LogSanitizer;
+
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -526,9 +528,16 @@ public final class AffectedTestsConfig {
                 throw new IllegalArgumentException("baseRef must not be null or blank");
             }
             if (!isAcceptableBaseRef(baseRef)) {
+                // The rejected value is echoed back in the exception message, which
+                // Gradle renders verbatim into the build log (and often into build-
+                // scan HTML). Sanitising here closes the same log-forgery surface
+                // that containsControlChars closes on the accept path — without it,
+                // an attacker-poisoned CI_BASE_REF would still get its forged
+                // status line printed, just via the *reject* branch instead of the
+                // accept branch. See the javadoc on isAcceptableBaseRef.
                 throw new IllegalArgumentException(
                         "baseRef is not a valid git ref, SHA, or short form: '"
-                                + baseRef + "' — expected something like "
+                                + LogSanitizer.sanitize(baseRef) + "' — expected something like "
                                 + "'origin/master', 'HEAD~1', or a 7-40 char hex SHA");
             }
             this.baseRef = baseRef;
@@ -549,13 +558,35 @@ public final class AffectedTestsConfig {
          * {@link org.eclipse.jgit.lib.Repository#isValidRefName(String)}),
          * short/long SHAs, and {@code HEAD~N}/{@code ^N}/{@code @{N}}
          * rev-expressions. Rejects path-traversal shapes by construction
-         * since JGit's refname validator already forbids {@code ..}, a
-         * leading {@code /}, and control characters — no hand-rolled
-         * string sniffing required. Keeping this decision inside the
-         * builder means every call site (CLI, Gradle plugin, programmatic
-         * users) gets the same contract without duplicating the rule.
+         * since JGit's refname validator already forbids {@code ..} and
+         * a leading {@code /}. The {@link #SHORT_SHA} short-circuit at
+         * the top bypasses {@code isValidRefName}, but is safe by
+         * construction: the hex-only character class excludes {@code .}
+         * and {@code /}, so path-traversal shapes cannot reach the SHA
+         * path.
+         *
+         * <p>Control characters ({@code \n}, {@code \r}, ESC, CSI, DEL,
+         * the whole C0 and C1 ranges) are rejected at the entry gate
+         * before any of the downstream matchers run. This is load-
+         * bearing for the {@link #REV_EXPR} path: its
+         * {@code @\{[^}]+\}} segment matches newline, ESC, and CSI
+         * verbatim, so a {@code baseRef} sourced from an attacker-
+         * controlled CI environment variable like
+         * {@code master@\{1\n\u001b[2JAffected Tests: SELECTED\u001b[m\}}
+         * previously passed validation and then flowed straight into
+         * {@code log.info("Base ref: {}", …)} in
+         * {@code AffectedTestsEngine} and into three
+         * {@code IllegalStateException} messages in
+         * {@code GitChangeDetector} — a log-forgery surface that let
+         * an attacker fabricate plugin-branded status lines in CI
+         * output. Rejecting at the gate closes every regex path at
+         * once without depending on getting each hand-crafted
+         * character class right.
          */
         private static boolean isAcceptableBaseRef(String baseRef) {
+            if (containsControlChars(baseRef)) {
+                return false;
+            }
             if (SHORT_SHA.matcher(baseRef).matches()) {
                 return true;
             }
@@ -576,6 +607,27 @@ public final class AffectedTestsConfig {
                 if ("HEAD".equals(head)
                         || org.eclipse.jgit.lib.Repository.isValidRefName(head)
                         || org.eclipse.jgit.lib.Repository.isValidRefName("refs/heads/" + head)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Returns {@code true} if {@code value} contains any C0 control
+         * character ({@code 0x00..0x1F}), DEL ({@code 0x7F}), or C1
+         * control character ({@code 0x80..0x9F}). Kept in the builder
+         * rather than reaching for {@link io.affectedtests.core.util.LogSanitizer}
+         * because this is a validation gate, not a logging concern —
+         * the string must be rejected here before it ever reaches a
+         * logger, and keeping the check local makes the
+         * {@link #isAcceptableBaseRef(String)} contract auditable
+         * without cross-package hops.
+         */
+        private static boolean containsControlChars(String value) {
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c < 0x20 || c == 0x7F || (c >= 0x80 && c <= 0x9F)) {
                     return true;
                 }
             }

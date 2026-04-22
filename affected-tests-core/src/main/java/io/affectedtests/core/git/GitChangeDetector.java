@@ -1,6 +1,7 @@
 package io.affectedtests.core.git;
 
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.util.LogSanitizer;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffEntry;
@@ -103,17 +104,26 @@ public final class GitChangeDetector {
                             + "actions/checkout (GitHub) / GIT_DEPTH: 0 (GitLab).",
                     e);
         } catch (IOException e) {
+            // JGit IOException messages can embed pack-file paths, ref names,
+            // or (on PackInvalidException / CorruptObjectException) raw bytes
+            // from the object database — all attacker-influenceable on an MR
+            // branch. Sanitise before embedding so the exception message,
+            // which Gradle renders verbatim into the build log, cannot carry
+            // a forged status line.
             throw new IllegalStateException(
                     "Affected Tests: I/O error while reading git metadata at '" + projectDir + "': "
-                            + e.getMessage(), e);
+                            + LogSanitizer.sanitize(e.getMessage()), e);
         } catch (GitAPIException e) {
             throw new IllegalStateException(
                     "Affected Tests: git diff against '" + config.baseRef() + "' failed: "
-                            + e.getMessage(), e);
+                            + LogSanitizer.sanitize(e.getMessage()), e);
         }
 
         log.info("Detected {} changed files", changedFiles.size());
-        changedFiles.forEach(f -> log.debug("  Changed: {}", f));
+        // File paths come straight from git diff entries on an
+        // attacker-controllable MR branch, so sanitise even at DEBUG
+        // — same rationale as every other diff-sourced log site.
+        changedFiles.forEach(f -> log.debug("  Changed: {}", LogSanitizer.sanitize(f)));
         return changedFiles;
     }
 

@@ -243,6 +243,86 @@ class AffectedTestsConfigTest {
     }
 
     @Test
+    void baseRefRejectsControlCharsInReflogSuffix() {
+        // Regression for v1.9.21 #14: the REV_EXPR pattern's reflog
+        // segment is {@code @\{[^}]+\}}, which happily matches
+        // newline / ESC / CSI / DEL. Pre-fix these inputs passed
+        // {@link AffectedTestsConfig.Builder#isAcceptableBaseRef} and
+        // then flowed unsanitised into
+        //   log.info("Base ref: {}", config.baseRef())
+        // inside AffectedTestsEngine and into three IllegalStateException
+        // messages in GitChangeDetector — a log-forgery surface when
+        // baseRef came from an attacker-controlled CI env var.
+        //
+        // The fix is a blanket control-char rejection at the entry gate
+        // of isAcceptableBaseRef, so every downstream matcher (short
+        // SHA, refname, rev-expression) refuses tainted input.
+        String fakePluginStatus = "master@{1\n"
+                + "\u001b[2JAffected Tests: SELECTED (DISCOVERY_SUCCESS) — 0 tests\u001b[m}";
+        assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef(fakePluginStatus).build(),
+                "baseRef containing newline + ANSI inside @{…} must be rejected at "
+                        + "validation time; otherwise an attacker could forge plugin-branded "
+                        + "CI status lines by poisoning CI_BASE_REF");
+        assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef("master@{1\n}").build(),
+                "Bare newline in reflog segment must also be rejected");
+        assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef("master@{\u001b}").build(),
+                "Bare ESC in reflog segment must be rejected");
+        assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef("master@{\u007F}").build(),
+                "Bare DEL in reflog segment must be rejected");
+        assertThrows(IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef("master\r\noops").build(),
+                "CRLF anywhere in the baseRef must be rejected pre-regex");
+    }
+
+    @Test
+    void baseRefValidationErrorDoesNotEchoRawControlChars() {
+        // Regression for v1.9.21 review finding T2-1: the reject branch of
+        // isAcceptableBaseRef throws IllegalArgumentException whose message
+        // embeds the offending baseRef. Gradle renders that message verbatim
+        // into the build log (and into build-scan HTML), so echoing raw
+        // newline/ESC/CSI/DEL would reintroduce the exact log-forgery
+        // surface that #14 closed on the accept path — just via the
+        // validation-failure path instead of log.info("Base ref: …").
+        //
+        // LogSanitizer must wrap the echoed value so the thrown message
+        // contains no C0, C1, or DEL characters.
+        String tainted = "master@{1\n\u001b[2JAffected Tests: SELECTED\u001b[m}";
+        IllegalArgumentException thrown = assertThrows(
+                IllegalArgumentException.class,
+                () -> AffectedTestsConfig.builder().baseRef(tainted).build());
+        String message = thrown.getMessage();
+        assertNotNull(message, "exception must carry a diagnostic message");
+        // Each forbidden byte class gets its own assertion so a regression
+        // that partially re-opens the surface (say, closes newline but leaks
+        // ESC) still fails loudly with a pointed message.
+        assertFalse(message.indexOf('\n') >= 0,
+                "baseRef validation message must not echo raw newline: " + debugEscape(message));
+        assertFalse(message.indexOf('\r') >= 0,
+                "baseRef validation message must not echo raw CR: " + debugEscape(message));
+        assertFalse(message.indexOf('\u001b') >= 0,
+                "baseRef validation message must not echo raw ESC: " + debugEscape(message));
+        assertFalse(message.indexOf('\u007F') >= 0,
+                "baseRef validation message must not echo raw DEL: " + debugEscape(message));
+    }
+
+    private static String debugEscape(String s) {
+        StringBuilder out = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || c == 0x7F || (c >= 0x80 && c <= 0x9F)) {
+                out.append(String.format("\\u%04X", (int) c));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    @Test
     void baseRefAllowsValidRefs() {
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/master").build());
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("origin/main").build());

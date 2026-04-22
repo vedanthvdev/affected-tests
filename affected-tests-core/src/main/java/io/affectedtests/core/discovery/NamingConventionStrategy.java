@@ -1,6 +1,7 @@
 package io.affectedtests.core.discovery;
 
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,7 +61,12 @@ public final class NamingConventionStrategy implements TestDiscoveryStrategy {
             for (var entry : expectedTestNames.entrySet()) {
                 if (entry.getValue().contains(testSimpleName)) {
                     discoveredTests.add(testFqn);
-                    log.debug("Naming match: {} → {}", entry.getKey(), testFqn);
+                    // Both keys (changed production FQNs from the diff)
+                    // and test FQNs (from the scanned source tree) are
+                    // attacker-influenced on a merge-gate run.
+                    log.debug("Naming match: {} → {}",
+                            LogSanitizer.sanitize(entry.getKey()),
+                            LogSanitizer.sanitize(testFqn));
                 }
             }
         }

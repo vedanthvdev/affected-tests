@@ -8,6 +8,7 @@ import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -196,9 +197,16 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                     for (ClassOrInterfaceType supertype : supertypesOf(decl)) {
                         if (targetsBySimpleName.containsKey(supertype.getNameAsString())) {
                             newImpls.add(implFqn);
+                            // {@code implFqn} and {@code supertype.getNameAsString()}
+                            // both originate from the scanned source tree,
+                            // which on a merge-gate run is attacker-
+                            // influenced. DEBUG-level, but sanitised for
+                            // forgery-resistance when ops drop the level.
                             log.debug("[impl] depth {}: {} ({}) extends/implements {}",
-                                    depth + 1, implFqn, decl.getClass().getSimpleName(),
-                                    supertype.getNameAsString());
+                                    depth + 1,
+                                    LogSanitizer.sanitize(implFqn),
+                                    decl.getClass().getSimpleName(),
+                                    LogSanitizer.sanitize(supertype.getNameAsString()));
                             break;
                         }
                     }
@@ -289,9 +297,16 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
             // known supertypes, which is the correct conservative
             // fallback (cannot become a false impl match; at worst we
             // underselect for a single declaration).
+            // {@code decl.getNameAsString()} originates from an
+            // attacker-controllable source file. This WARN surfaces at
+            // the default log level, so route through LogSanitizer to
+            // keep the log-forgery contract from v1.9.19 honest.
+            // {@code decl.getClass().getSimpleName()} is a JavaParser
+            // internal constant and does not need sanitising.
             log.warn("Affected Tests: [impl] unknown TypeDeclaration subtype {} for {} — "
                             + "supertype edges cannot be derived, skipping",
-                    decl.getClass().getSimpleName(), decl.getNameAsString());
+                    decl.getClass().getSimpleName(),
+                    LogSanitizer.sanitize(decl.getNameAsString()));
         }
         return result;
     }

@@ -164,6 +164,71 @@ class SourceFileScannerTest {
     }
 
     @Test
+    void rejectsFileLevelSymlinkEscapingProjectRoot(@TempDir Path outside) throws IOException {
+        // Threat model (v1.9.19 closed the directory-level leg of this
+        // attack; v1.9.21 closes the per-file leg): even when
+        // `src/main/java` is a normal directory inside the project,
+        // an attacker MR can still commit
+        //   `src/main/java/com/x/Leak.java -> /etc/passwd`
+        // and the pre-fix scanner would happily enumerate the file,
+        // hand it to JavaParser, and surface the filename in the
+        // discovery pipeline. `visitFile` now rejects symlinks
+        // unconditionally — a regular {@code .java} file whose real
+        // path legitimately lives inside the tree is just a regular
+        // file, not a symlink.
+        Path pkg = tempDir.resolve("src/main/java/com/x");
+        Files.createDirectories(pkg);
+        Files.writeString(pkg.resolve("Ok.java"), "package com.x;\nclass Ok {}");
+
+        Path attackTarget = outside.resolve("Leak.java");
+        Files.writeString(attackTarget, "package evil;\nclass Leak {}");
+
+        Path fileLink = pkg.resolve("Leak.java");
+        try {
+            Files.createSymbolicLink(fileLink, attackTarget);
+        } catch (UnsupportedOperationException | FileSystemException e) {
+            return;
+        }
+
+        List<Path> collected = SourceFileScanner.collectJavaFiles(
+                tempDir.resolve("src/main/java"));
+
+        assertEquals(1, collected.size(),
+                "Only the real Ok.java should be collected; the symlinked Leak.java "
+                        + "must be skipped even if its real path is outside the project root");
+        assertTrue(collected.get(0).getFileName().toString().equals("Ok.java"));
+    }
+
+    @Test
+    void scansTestFqnsIgnoresFileLevelSymlinks(@TempDir Path outside) throws IOException {
+        // Same hardening contract as above, but for the path that
+        // feeds {@link ProjectIndex#testFqns()} — the two visitors
+        // must agree or an attacker could plant a symlinked file
+        // that is invisible to `collectTestFiles` but visible to
+        // `scanTestFqns` (or vice versa), producing inconsistent
+        // bucket counts that are hard to debug.
+        Path pkg = tempDir.resolve("src/test/java/com/x");
+        Files.createDirectories(pkg);
+        Files.writeString(pkg.resolve("OkTest.java"), "package com.x;\nclass OkTest {}");
+
+        Path attackTarget = outside.resolve("LeakTest.java");
+        Files.writeString(attackTarget, "package evil;\nclass LeakTest {}");
+        Path fileLink = pkg.resolve("LeakTest.java");
+        try {
+            Files.createSymbolicLink(fileLink, attackTarget);
+        } catch (UnsupportedOperationException | FileSystemException e) {
+            return;
+        }
+
+        var fqns = SourceFileScanner.scanTestFqns(tempDir, List.of("src/test/java"));
+
+        assertTrue(fqns.contains("com.x.OkTest"));
+        assertFalse(fqns.contains("com.x.LeakTest"),
+                "Symlinked file must not contribute to test FQN discovery");
+        assertEquals(1, fqns.size());
+    }
+
+    @Test
     void scansTestFqnsFromDeeplyNestedModules() throws IOException {
         Path depth1 = tempDir.resolve("api/src/test/java/com/example");
         Files.createDirectories(depth1);

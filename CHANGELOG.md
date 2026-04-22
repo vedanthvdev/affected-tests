@@ -6,6 +6,111 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — tier-1 reliability / safety batch (v1.9.21)
+
+The v1.9.20 batch closed every tier-1 *correctness* bug surfaced by the
+multi-reviewer sweep. v1.9.21 closes the tier-1 *reliability and
+safety* cluster from the same review — the class of issues that don't
+silently drop tests but do weaken the merge-gate contract and the
+hardening work shipped in v1.9.19.
+
+- **`SourceFileScanner` now rejects file-level symlinks during the
+  walk.** v1.9.19 hardened the *directory* path via
+  `stayInsideProjectRoot` + `toRealPath`, which closed
+  `src/main/java -> /` as an MR-planted symlink. The per-file leg of
+  the same attack — an attacker committing
+  `src/main/java/com/x/Leak.java -> /etc/passwd` — slid past that
+  guard because `Files.walkFileTree` still called `visitFile` on the
+  symlink and the visitor didn't check `attrs.isSymbolicLink()`. The
+  two file-walk visitors in the scanner (`collectJavaFiles`,
+  `walkFqnsUnder`) now skip any entry flagged as a symlink
+  unconditionally; a regular `.java` file whose real path
+  legitimately lives inside the project tree is just a regular file,
+  not a symlink. Regression lives in `SourceFileScannerTest`
+  (`rejectsFileLevelSymlinkEscapingProjectRoot`,
+  `scansTestFqnsIgnoresFileLevelSymlinks`) — both fail when the
+  production guard is reverted, covering both the
+  `collectTestFiles`/`collectSourceFiles` path and the
+  `scanTestFqns` path so the two halves of discovery can never
+  diverge on what counts as a valid source file.
+- **Per-subtree `IOException`s no longer truncate the whole walk.**
+  The default `SimpleFileVisitor.visitFileFailed` rethrows, and the
+  scanner's outer `IOException` catch swallowed the remaining walk
+  silently — a single unreadable nested module (permission denied,
+  file-deleted-under-us race, filesystem loop) took every readable
+  sibling down with it. All three walk sites (`collectJavaFiles`,
+  `walkFqnsUnder`, `findAllMatchingDirs`) now override
+  `visitFileFailed` to log the unreadable entry at WARN via
+  `LogSanitizer` and continue. Default-visible surfacing of the
+  skipped entry is the load-bearing change: operators can now see
+  when a scan ran incomplete, where previously they'd silently
+  under-select tests and have no way to correlate it with CI config
+  drift. No regression test — inducing a portable per-entry
+  `IOException` requires either root-evadable `chmod 000` semantics
+  (fails on CI runners running as root) or heavyweight filesystem
+  mocking; the fix is evident in the diff and backed by the 11
+  existing walk tests in `SourceFileScannerTest`.
+- **`AffectedTestsConfig.Builder#isAcceptableBaseRef` now rejects
+  control characters at the entry gate.** The rev-expression pattern
+  used `@\{[^}]+\}` for the reflog segment — `[^}]` happily matched
+  newline, ESC, CSI, and DEL. A `baseRef` sourced from an
+  attacker-controlled CI env var like
+  `master@{1\n\u001b[2JAffected Tests: SELECTED\u001b[m}` previously
+  passed validation and then flowed unsanitised into
+  `log.info("Base ref: {}", …)` in `AffectedTestsEngine` and into
+  three `IllegalStateException` messages in `GitChangeDetector`. An
+  attacker who could poison `CI_BASE_REF` (or an equivalent) could
+  forge plugin-branded status lines into CI output and defeat
+  grep-based merge gates. The fix is a single blanket
+  `containsControlChars` check before any of the downstream matchers
+  run — C0 (`0x00..0x1F`), DEL (`0x7F`), and C1 (`0x80..0x9F`) are
+  all rejected, closing every regex path at once without depending
+  on getting each hand-crafted character class right. Regression
+  lives in `AffectedTestsConfigTest.baseRefRejectsControlCharsInReflogSuffix`,
+  which covers the newline-in-reflog shape, bare ESC/DEL, and CRLF
+  anywhere in the input; each case fails when the entry-gate check
+  is removed.
+- **`LogSanitizer` coverage extended to every remaining diff-sourced
+  log site.** v1.9.19 introduced the sanitizer and applied it at
+  four sites; the multi-reviewer review found ~28 additional sites
+  passing raw filenames, FQNs, or exception messages straight to the
+  logger — most at DEBUG, but several at default-visible WARN (and
+  two inside `IllegalStateException` messages that Gradle renders
+  verbatim into the build log). An attacker-crafted filename or a
+  poisoned `JavaParser` diagnostic carrying `\u001b[2J…\u001b[m`
+  could still forge ops-visible log lines. All remaining sites now
+  route through `LogSanitizer.sanitize`:
+  `JavaParsers.parseOrWarn` (WARN + DEBUG),
+  `ImplementationStrategy.supertypesOf` (WARN) and its per-depth
+  match trace (DEBUG), `PathToClassMapper`'s eight classification
+  DEBUG lines, `UsageStrategy`'s seven tier-match DEBUG lines,
+  `NamingConventionStrategy`'s match DEBUG line,
+  `GitChangeDetector`'s per-file changed-entry DEBUG line and the
+  `IOException` / `GitAPIException` wrappers it throws (because
+  JGit exception messages can carry attacker-influenced pack-file
+  paths and ref segments), `AffectedTestsEngine`'s FQN-has-no-file
+  DEBUG line, `SourceFileScanner.findAllMatchingDirs`'s trailing
+  DEBUG summary (brought into parity with its WARN path), and the
+  echo of the offending value inside the `IllegalArgumentException`
+  thrown by `AffectedTestsConfig.Builder#baseRef` when validation
+  fails (otherwise the reject branch would reopen the same surface
+  `containsControlChars` closes on the accept branch). Even DEBUG
+  sites are sanitised because operators who bump the log level to
+  chase a false-positive selection are exactly the audience an
+  attacker would target — the log-forgery contract has to hold at
+  every visibility level, not just WARN/INFO. Regressions:
+  `LogSanitizerTest` covers the escape table;
+  `baseRefValidationErrorDoesNotEchoRawControlChars` pins the
+  newly-sanitised exception-message path.
+
+Two related findings from the same review are intentionally deferred
+to batch 6 (v1.9.22) so each PR stays scoped: #9 (`ProjectIndex`
+parse failures signal discovery-incomplete to the engine so the
+safety net can escalate explicitly) and #11 (configurable timeout on
+the nested `./gradlew` invocation so a hung child test cannot pin
+the outer build indefinitely). Both are observable-behaviour changes
+and deserve their own CHANGELOG entries.
+
 ### Fixed — post-v1.9.19 multi-reviewer correctness pass (v1.9.20)
 
 A second, deeper multi-agent review of the post-v1.9.19 tree surfaced a
