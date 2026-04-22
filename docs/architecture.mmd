@@ -1,48 +1,66 @@
 flowchart TD
     Start(["git diff baseRef..HEAD<br/>+ uncommitted + staged"]):::io --> Changed{Any changed<br/>files?}:::core
 
-    Changed -->|no| EmptyGate{runAllIfNoMatches?}:::core
-    EmptyGate -->|true| RunAllEmpty[[runAll = true<br/>reason = RUN_ALL_ON_EMPTY_CHANGESET]]:::warn
-    EmptyGate -->|false default| Exit0[Exit 0 · skip tests]:::muted
+    Changed -->|no| SitEmpty[/Situation<br/>EMPTY_DIFF/]:::situation
+    Changed -->|yes| Mapper{{PathToClassMapper<br/>buckets each path}}:::core
 
-    Changed -->|yes| Mapper{{PathToClassMapper}}:::core
+    Mapper -->|matches<br/>ignorePaths| BucketIgnored[ignored bucket<br/>*.md · LICENSE · generated]:::muted
+    Mapper -->|under outOfScope<br/>TestDirs / SourceDirs| BucketOOS[out-of-scope bucket<br/>api-test · gatling]:::muted
+    Mapper -->|".java under<br/>sourceDirs"| BucketProd[production bucket<br/>changed class FQNs]:::data
+    Mapper -->|".java under<br/>testDirs"| BucketTest[test bucket<br/>directly changed test FQNs]:::data
+    Mapper -->|everything else<br/>yml · gradle · migrations| BucketUnmapped[unmapped bucket]:::warn
 
-    Mapper -->|".java under sourceDirs"| Prod[Changed production<br/>class FQNs]:::data
-    Mapper -->|".java under testDirs"| Direct[Directly changed<br/>test FQNs]:::data
-    Mapper -->|matches excludePaths| Excluded[Silently dropped<br/>explicit opt-out]:::muted
-    Mapper -->|"non-Java or .java<br/>outside configured dirs"| Unmapped[Unmapped files<br/>yaml · gradle · migrations]:::warn
+    BucketIgnored --> Classify{{"Classify situation"}}:::core
+    BucketOOS --> Classify
+    BucketProd --> Classify
+    BucketTest --> Classify
+    BucketUnmapped --> Classify
 
-    Unmapped --> NonJavaGate{runAllOnNonJavaChange?}:::core
-    NonJavaGate -->|true default| RunAllNonJava[[runAll = true<br/>reason = RUN_ALL_ON_NON_JAVA_CHANGE]]:::warn
-    NonJavaGate -->|false opt-out| Skip[Silent skip<br/>legacy behaviour]:::muted
+    Classify -->|"all files ignored"| SitAllIgnored[/Situation<br/>ALL_FILES_IGNORED/]:::situation
+    Classify -->|"all files out of scope"| SitAllOOS[/Situation<br/>ALL_FILES_OUT_OF_SCOPE/]:::situation
+    Classify -->|"unmapped non-empty"| SitUnmapped[/Situation<br/>UNMAPPED_FILE/]:::situation
+    Classify -->|"only in-scope .java"| Engine[[AffectedTestsEngine<br/>4 strategies · merged]]:::core
 
-    Prod --> Engine[[AffectedTestsEngine<br/>4 strategies · merged]]:::core
     Engine --> Naming[naming<br/>Foo → FooTest / FooIT]:::strat
     Engine --> Usage["usage<br/>JavaParser: imports + type refs"]:::strat
-    Engine --> Impl[impl<br/>subtypes of changed interfaces]:::strat
-    Engine --> Transitive[transitive<br/>reverse-dep walk · N levels]:::strat
+    Engine --> Impl["impl<br/>subtypes of changed interfaces<br/>(Impl / Default prefixes)"]:::strat
+    Engine --> Transitive["transitive<br/>reverse-dep walk · depth 4"]:::strat
 
-    Naming --> Union[Union of affected<br/>test class FQNs]:::data
+    Naming --> Union[Union of<br/>affected test FQNs]:::data
     Usage --> Union
     Impl --> Union
     Transitive --> Union
-    Direct --> Union
+    BucketTest --> Union
 
     Union --> UnionGate{Union empty?}:::core
-    UnionGate -->|no| Router[Group FQNs by<br/>owning Gradle subproject]:::core
-    UnionGate -->|yes| DiscoveryEmptyGate{runAllIfNoMatches?}:::core
-    DiscoveryEmptyGate -->|true| RunAllDiscovery[[runAll = true<br/>reason = RUN_ALL_IF_NO_MATCHES]]:::warn
-    DiscoveryEmptyGate -->|false default| Exit0
+    UnionGate -->|yes| SitDiscoveryEmpty[/Situation<br/>DISCOVERY_EMPTY/]:::situation
+    UnionGate -->|no| SitDiscoverySuccess[/Situation<br/>DISCOVERY_SUCCESS/]:::situation
+
+    SitEmpty --> Resolve
+    SitAllIgnored --> Resolve
+    SitAllOOS --> Resolve
+    SitUnmapped --> Resolve
+    SitDiscoveryEmpty --> Resolve
+    SitDiscoverySuccess --> Resolve
+
+    Resolve{{"Resolve Action<br/>(priority order)"}}:::core
+    Resolve --> Explicit["1 · explicit onXxx setting"]:::priority
+    Explicit --> Legacy["2 · legacy boolean<br/>(runAllIfNoMatches / runAllOnNonJavaChange)"]:::priority
+    Legacy --> ModeDefault["3 · mode default<br/>(auto · local · ci · strict)"]:::priority
+    ModeDefault --> Hardcoded["4 · pre-v2 hardcoded default"]:::priority
+    Hardcoded --> Action{Action}:::core
+
+    Action -->|SELECTED| Router[Group FQNs by<br/>owning Gradle subproject]:::core
+    Action -->|FULL_SUITE| FullSuite["gradle test<br/>full suite · no --tests filter"]:::io
+    Action -->|SKIPPED| Exit0[Exit 0 · skip tests]:::muted
 
     Router --> Dispatch[":moduleA:test --tests FooTest<br/>:moduleB:test --tests BarTest"]:::io
-
-    RunAllEmpty --> FullSuite
-    RunAllNonJava --> FullSuite
-    RunAllDiscovery --> FullSuite["gradle test<br/>full suite · no --tests filter"]:::io
 
     classDef io fill:#1f2937,color:#f9fafb,stroke:#374151,stroke-width:1px
     classDef core fill:#1d4ed8,color:#ffffff,stroke:#1e3a8a,stroke-width:1px
     classDef data fill:#047857,color:#ffffff,stroke:#064e3b,stroke-width:1px
     classDef strat fill:#0e7490,color:#ffffff,stroke:#155e75,stroke-width:1px
+    classDef situation fill:#7c3aed,color:#ffffff,stroke:#5b21b6,stroke-width:1px
+    classDef priority fill:#0f766e,color:#ffffff,stroke:#115e59,stroke-width:1px
     classDef warn fill:#b45309,color:#ffffff,stroke:#78350f,stroke-width:1px
     classDef muted fill:#4b5563,color:#e5e7eb,stroke:#374151,stroke-width:1px

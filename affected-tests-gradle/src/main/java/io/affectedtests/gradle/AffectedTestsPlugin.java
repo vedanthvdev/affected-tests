@@ -28,16 +28,25 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         );
         extension.getIncludeUncommitted().convention(true);
         extension.getIncludeStaged().convention(true);
-        extension.getRunAllIfNoMatches().convention(false);
-        extension.getRunAllOnNonJavaChange().convention(true);
+        // No conventions for the two legacy booleans — leaving them
+        // unset is the v2 signal that the caller has not overridden the
+        // defaults, which lets the core config resolver apply
+        // mode-based defaults instead of always shimming the pre-v2
+        // boolean translation. Zero-config users still get pre-v2
+        // behaviour because the core builder's hardcoded fallbacks
+        // match the old convention values 1:1.
         extension.getStrategies().convention(List.of("naming", "usage", "impl", "transitive"));
-        extension.getTransitiveDepth().convention(2);
+        extension.getTransitiveDepth().convention(4);
         extension.getTestSuffixes().convention(List.of("Test", "IT", "ITTest", "IntegrationTest"));
         extension.getSourceDirs().convention(List.of("src/main/java"));
         extension.getTestDirs().convention(List.of("src/test/java"));
-        extension.getExcludePaths().convention(List.of("**/generated/**"));
+        // No convention for excludePaths / ignorePaths: an empty Gradle
+        // provider is how we signal "let the core config builder pick
+        // the v2 default list" (which is broader than the pre-v2
+        // single-entry default). Setting a convention here would pin
+        // the pre-v2 narrow default even on zero-config installs.
         extension.getIncludeImplementationTests().convention(true);
-        extension.getImplementationNaming().convention(List.of("Impl"));
+        extension.getImplementationNaming().convention(List.of("Impl", "Default"));
 
         Project rootProject = project.getRootProject();
         Directory rootDir = rootProject.getLayout().getProjectDirectory();
@@ -57,8 +66,17 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getSourceDirs().set(extension.getSourceDirs());
             task.getTestDirs().set(extension.getTestDirs());
             task.getExcludePaths().set(extension.getExcludePaths());
+            task.getIgnorePaths().set(extension.getIgnorePaths());
+            task.getOutOfScopeTestDirs().set(extension.getOutOfScopeTestDirs());
+            task.getOutOfScopeSourceDirs().set(extension.getOutOfScopeSourceDirs());
             task.getIncludeImplementationTests().set(extension.getIncludeImplementationTests());
             task.getImplementationNaming().set(extension.getImplementationNaming());
+            task.getMode().set(extension.getMode());
+            task.getOnEmptyDiff().set(extension.getOnEmptyDiff());
+            task.getOnAllFilesIgnored().set(extension.getOnAllFilesIgnored());
+            task.getOnAllFilesOutOfScope().set(extension.getOnAllFilesOutOfScope());
+            task.getOnUnmappedFile().set(extension.getOnUnmappedFile());
+            task.getOnDiscoveryEmpty().set(extension.getOnDiscoveryEmpty());
 
             task.getRootDir().set(rootDir);
             task.getSubprojectPaths().set(project.provider(() -> collectSubprojectPaths(rootProject)));

@@ -43,20 +43,40 @@ public final class ProjectIndex {
     public static ProjectIndex build(Path projectDir, AffectedTestsConfig config) {
         log.info("Building project index for {}", projectDir);
 
-        List<Path> sourceFiles = SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs());
-        List<Path> testFiles = SourceFileScanner.collectTestFiles(projectDir, config.testDirs());
+        List<String> oosSource = config.outOfScopeSourceDirs();
+        List<String> oosTest = config.outOfScopeTestDirs();
+
+        List<Path> sourceFiles = filterOutOfScope(
+                SourceFileScanner.collectSourceFiles(projectDir, config.sourceDirs()),
+                projectDir, oosSource, oosTest);
+        List<Path> testFiles = filterOutOfScope(
+                SourceFileScanner.collectTestFiles(projectDir, config.testDirs()),
+                projectDir, oosSource, oosTest);
+
         LinkedHashMap<String, Path> testFqnToPath = SourceFileScanner.scanTestFqnsWithFiles(
                 projectDir, config.testDirs());
+        if (!oosSource.isEmpty() || !oosTest.isEmpty()) {
+            // Drop out-of-scope test FQNs from the dispatch map. Without
+            // this, discovery strategies could still return FQNs living
+            // under {@code api-test/src/test/java} and the task would then
+            // try to run them — the entire point of the out-of-scope knob
+            // is that those tests never reach the affected-test dispatch.
+            testFqnToPath.entrySet().removeIf(entry -> isUnderAny(
+                    entry.getValue(), projectDir, oosSource, oosTest));
+        }
 
         Set<String> sourceFqns = new LinkedHashSet<>();
         for (String sourceDir : config.sourceDirs()) {
             for (Path resolved : SourceFileScanner.findAllMatchingDirs(projectDir, sourceDir)) {
+                if (isUnderAny(resolved, projectDir, oosSource, oosTest)) continue;
                 sourceFqns.addAll(SourceFileScanner.fqnsUnder(resolved));
             }
         }
 
-        log.info("Project index: {} source files, {} test files, {} source FQNs, {} test FQNs",
-                sourceFiles.size(), testFiles.size(), sourceFqns.size(), testFqnToPath.size());
+        log.info("Project index: {} source files, {} test files, {} source FQNs, {} test FQNs"
+                        + " (out-of-scope source dirs: {}, out-of-scope test dirs: {})",
+                sourceFiles.size(), testFiles.size(), sourceFqns.size(), testFqnToPath.size(),
+                oosSource.size(), oosTest.size());
 
         return new ProjectIndex(
                 Collections.unmodifiableList(sourceFiles),
@@ -64,6 +84,50 @@ public final class ProjectIndex {
                 Collections.unmodifiableMap(testFqnToPath),
                 Collections.unmodifiableSet(sourceFqns)
         );
+    }
+
+    private static List<Path> filterOutOfScope(List<Path> files, Path projectDir,
+                                               List<String> oosSource, List<String> oosTest) {
+        if (oosSource.isEmpty() && oosTest.isEmpty()) {
+            return files;
+        }
+        List<Path> filtered = new ArrayList<>(files.size());
+        for (Path file : files) {
+            if (!isUnderAny(file, projectDir, oosSource, oosTest)) {
+                filtered.add(file);
+            }
+        }
+        return filtered;
+    }
+
+    /**
+     * Normalised, boundary-aware "does this absolute path sit under any of
+     * the given project-relative dirs?" check. Mirrors
+     * {@link io.affectedtests.core.mapping.PathToClassMapper} semantics so
+     * a diff file and an indexed file that point to the same location are
+     * routed the same way.
+     */
+    static boolean isUnderAny(Path file, Path projectDir, List<String> oosSource, List<String> oosTest) {
+        if (oosSource.isEmpty() && oosTest.isEmpty()) return false;
+        String rel;
+        try {
+            rel = projectDir.toAbsolutePath().relativize(file.toAbsolutePath()).toString();
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        String normalized = rel.replace(java.io.File.separatorChar, '/');
+        return startsWithAny(normalized, oosSource) || startsWithAny(normalized, oosTest);
+    }
+
+    private static boolean startsWithAny(String normalized, List<String> dirs) {
+        for (String dir : dirs) {
+            if (dir == null || dir.isBlank()) continue;
+            String d = dir.replace('\\', '/');
+            if (!d.endsWith("/")) d += "/";
+            if (normalized.startsWith(d)) return true;
+            if (normalized.contains("/" + d)) return true;
+        }
+        return false;
     }
 
     public List<Path> sourceFiles() { return sourceFiles; }

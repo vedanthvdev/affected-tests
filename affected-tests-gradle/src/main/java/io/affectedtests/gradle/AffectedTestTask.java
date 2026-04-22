@@ -3,7 +3,10 @@ package io.affectedtests.gradle;
 import io.affectedtests.core.AffectedTestsEngine;
 import io.affectedtests.core.AffectedTestsEngine.AffectedTestsResult;
 import io.affectedtests.core.AffectedTestsEngine.EscalationReason;
+import io.affectedtests.core.config.Action;
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.config.Mode;
+import io.affectedtests.core.config.Situation;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
 import org.gradle.api.file.DirectoryProperty;
@@ -81,24 +84,38 @@ public abstract class AffectedTestTask extends DefaultTask {
 
     /**
      * Whether to run the full test suite when no affected tests are found.
-     * Default: {@code false} (skip tests when nothing is affected).
+     * v2 back-compat — translated into {@link Situation#EMPTY_DIFF},
+     * {@link Situation#ALL_FILES_IGNORED},
+     * {@link Situation#ALL_FILES_OUT_OF_SCOPE}, and
+     * {@link Situation#DISCOVERY_EMPTY} actions by the core config
+     * builder when set. Unset means "let the v2 resolver pick defaults".
+     * Default: unset (matching pre-v2 {@code false} once translated).
+     *
+     * <p>Marked {@link org.gradle.api.tasks.Optional @Optional} because
+     * the extension no longer installs a convention — the Gradle task
+     * must be free to leave the property unset when the user has not
+     * overridden the legacy boolean.
      *
      * @return the run-all-if-no-matches property
      */
     @Input
+    @org.gradle.api.tasks.Optional
     public abstract Property<Boolean> getRunAllIfNoMatches();
 
     /**
      * Whether to force a full test run when the change set contains any
      * file that cannot be resolved to a Java class under the configured
-     * source/test directories (e.g. {@code application.yml},
-     * {@code build.gradle}, a Liquibase changelog). Excluded paths are
-     * honoured and do not trigger the escalation.
-     * Default: {@code true} — "run more, never run less".
+     * source/test directories. v2 back-compat — translates into
+     * {@link Situation#UNMAPPED_FILE}'s action.
+     *
+     * <p>Marked {@link org.gradle.api.tasks.Optional @Optional} because
+     * the extension no longer installs a convention; leaving it unset
+     * is what lets the v2 resolver reach its own defaults.
      *
      * @return the run-all-on-non-java-change property
      */
     @Input
+    @org.gradle.api.tasks.Optional
     public abstract Property<Boolean> getRunAllOnNonJavaChange();
 
     /**
@@ -149,13 +166,47 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract ListProperty<String> getTestDirs();
 
     /**
-     * Glob patterns for files to exclude from analysis.
-     * Default: {@code ["&#42;&#42;/generated/&#42;&#42;"]}.
+     * v2 back-compat alias for {@link #getIgnorePaths()}. When neither
+     * is set, the core config's default ignore-path list applies.
      *
      * @return the exclude paths list property
+     * @deprecated prefer {@link #getIgnorePaths()}.
      */
     @Input
+    @org.gradle.api.tasks.Optional
+    @Deprecated
     public abstract ListProperty<String> getExcludePaths();
+
+    /**
+     * Glob patterns for files that must never influence test selection.
+     * Optional — when unset, the core config's default list applies.
+     *
+     * @return the ignore paths list property
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract ListProperty<String> getIgnorePaths();
+
+    /**
+     * Test source directories (e.g. {@code "api-test/src/test/java"})
+     * whose contents the plugin must not dispatch via the
+     * {@code affectedTest} task.
+     *
+     * @return the out-of-scope test dirs list property
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract ListProperty<String> getOutOfScopeTestDirs();
+
+    /**
+     * Production source directories the plugin must treat as
+     * out-of-scope.
+     *
+     * @return the out-of-scope source dirs list property
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract ListProperty<String> getOutOfScopeSourceDirs();
 
     /**
      * Whether to include tests for implementations of changed interfaces/base classes.
@@ -167,14 +218,49 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<Boolean> getIncludeImplementationTests();
 
     /**
-     * Suffixes for finding implementation classes (e.g. {@code "Impl"} matches
-     * {@code FooServiceImpl} for a changed {@code FooService}).
-     * Default: {@code ["Impl"]}.
+     * Suffixes/prefixes for finding implementation classes.
+     * Default: {@code ["Impl", "Default"]}.
      *
      * @return the implementation naming list property
      */
     @Input
     public abstract ListProperty<String> getImplementationNaming();
+
+    /**
+     * Execution profile name — one of {@code "auto"}, {@code "local"},
+     * {@code "ci"}, {@code "strict"}. Unset leaves defaults in
+     * pre-v2 mode.
+     *
+     * @return the mode property
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getMode();
+
+    /** @return the on-empty-diff situation action property */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnEmptyDiff();
+
+    /** @return the on-all-files-ignored situation action property */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnAllFilesIgnored();
+
+    /** @return the on-all-files-out-of-scope situation action property */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnAllFilesOutOfScope();
+
+    /** @return the on-unmapped-file situation action property */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnUnmappedFile();
+
+    /** @return the on-discovery-empty situation action property */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnDiscoveryEmpty();
 
     /**
      * Map of subproject directory (relative to the root project, empty string
@@ -210,21 +296,7 @@ public abstract class AffectedTestTask extends DefaultTask {
     public void runAffectedTests() {
         Path projectDir = getRootDir().get().getAsFile().toPath();
 
-        AffectedTestsConfig config = AffectedTestsConfig.builder()
-                .baseRef(getBaseRef().get())
-                .includeUncommitted(getIncludeUncommitted().get())
-                .includeStaged(getIncludeStaged().get())
-                .runAllIfNoMatches(getRunAllIfNoMatches().get())
-                .runAllOnNonJavaChange(getRunAllOnNonJavaChange().get())
-                .strategies(new LinkedHashSet<>(getStrategies().get()))
-                .transitiveDepth(getTransitiveDepth().get())
-                .testSuffixes(getTestSuffixes().get())
-                .sourceDirs(getSourceDirs().get())
-                .testDirs(getTestDirs().get())
-                .excludePaths(getExcludePaths().get())
-                .includeImplementationTests(getIncludeImplementationTests().get())
-                .implementationNaming(getImplementationNaming().get())
-                .build();
+        AffectedTestsConfig config = buildConfig();
 
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
@@ -239,6 +311,17 @@ public abstract class AffectedTestTask extends DefaultTask {
         LogLine summary = renderSummary(result);
         getLogger().lifecycle(summary.format(), summary.args());
 
+        if (result.skipped()) {
+            // Skipped is its own first-class outcome in v2: the engine
+            // deliberately chose to run no tests (e.g. api-test-only diff
+            // with onAllFilesOutOfScope=SKIPPED). Logging it distinctly
+            // from "selection empty" keeps the user's --explain expectation
+            // honest — "skipped (situation)" vs "no affected tests".
+            getLogger().lifecycle("Skipping test execution ({}: {}).",
+                    result.situation(), result.action());
+            return;
+        }
+
         if (result.testClassFqns().isEmpty() && !result.runAll()) {
             getLogger().lifecycle("No affected tests to run. Skipping test execution.");
             return;
@@ -248,6 +331,81 @@ public abstract class AffectedTestTask extends DefaultTask {
                 result.testClassFqns(),
                 result.testFqnToPath(),
                 result.runAll());
+    }
+
+    /**
+     * Assembles the immutable core config from the task's Gradle
+     * properties. Legacy booleans and the new situation/mode knobs are
+     * all optional at this layer; the core builder handles precedence
+     * (explicit > legacy-boolean > mode > pre-v2 default).
+     */
+    private AffectedTestsConfig buildConfig() {
+        AffectedTestsConfig.Builder builder = AffectedTestsConfig.builder()
+                .baseRef(getBaseRef().get())
+                .includeUncommitted(getIncludeUncommitted().get())
+                .includeStaged(getIncludeStaged().get())
+                .strategies(new LinkedHashSet<>(getStrategies().get()))
+                .transitiveDepth(getTransitiveDepth().get())
+                .testSuffixes(getTestSuffixes().get())
+                .sourceDirs(getSourceDirs().get())
+                .testDirs(getTestDirs().get())
+                .includeImplementationTests(getIncludeImplementationTests().get())
+                .implementationNaming(getImplementationNaming().get());
+
+        if (getRunAllIfNoMatches().isPresent()) {
+            builder.runAllIfNoMatches(getRunAllIfNoMatches().get());
+        }
+        if (getRunAllOnNonJavaChange().isPresent()) {
+            builder.runAllOnNonJavaChange(getRunAllOnNonJavaChange().get());
+        }
+        if (getIgnorePaths().isPresent() && !getIgnorePaths().get().isEmpty()) {
+            builder.ignorePaths(getIgnorePaths().get());
+        } else if (getExcludePaths().isPresent() && !getExcludePaths().get().isEmpty()) {
+            builder.excludePaths(getExcludePaths().get());
+        }
+        if (getOutOfScopeTestDirs().isPresent() && !getOutOfScopeTestDirs().get().isEmpty()) {
+            builder.outOfScopeTestDirs(getOutOfScopeTestDirs().get());
+        }
+        if (getOutOfScopeSourceDirs().isPresent() && !getOutOfScopeSourceDirs().get().isEmpty()) {
+            builder.outOfScopeSourceDirs(getOutOfScopeSourceDirs().get());
+        }
+        if (getMode().isPresent()) {
+            builder.mode(parseMode(getMode().get()));
+        }
+        if (getOnEmptyDiff().isPresent()) {
+            builder.onEmptyDiff(parseAction(getOnEmptyDiff().get(), "onEmptyDiff"));
+        }
+        if (getOnAllFilesIgnored().isPresent()) {
+            builder.onAllFilesIgnored(parseAction(getOnAllFilesIgnored().get(), "onAllFilesIgnored"));
+        }
+        if (getOnAllFilesOutOfScope().isPresent()) {
+            builder.onAllFilesOutOfScope(parseAction(getOnAllFilesOutOfScope().get(), "onAllFilesOutOfScope"));
+        }
+        if (getOnUnmappedFile().isPresent()) {
+            builder.onUnmappedFile(parseAction(getOnUnmappedFile().get(), "onUnmappedFile"));
+        }
+        if (getOnDiscoveryEmpty().isPresent()) {
+            builder.onDiscoveryEmpty(parseAction(getOnDiscoveryEmpty().get(), "onDiscoveryEmpty"));
+        }
+        return builder.build();
+    }
+
+    private static Mode parseMode(String raw) {
+        try {
+            return Mode.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new GradleException("Unknown affectedTests.mode '" + raw
+                    + "'. Expected one of: auto, local, ci, strict.", e);
+        }
+    }
+
+    private static Action parseAction(String raw, String property) {
+        try {
+            return Action.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new GradleException("Unknown " + property + " action '" + raw
+                    + "'. Expected one of: selected, full_suite, skipped.", e);
+        }
     }
 
     private void executeTests(Path projectDir,
@@ -433,13 +591,21 @@ public abstract class AffectedTestTask extends DefaultTask {
      */
     static String describeEscalation(EscalationReason reason) {
         Objects.requireNonNull(reason, "reason");
+        // Phrases deliberately keep the legacy flag names ("runAllIfNoMatches=true",
+        // "runAllOnNonJavaChange=true") alongside the new situation-based name so
+        // existing CI greps stay matched. Removing either side would require a
+        // coordinated pipeline migration we do not want to force in Phase 1.
         return switch (reason) {
             case RUN_ALL_ON_NON_JAVA_CHANGE ->
-                    "runAllOnNonJavaChange=true — non-Java or unmapped file in diff";
+                    "runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff";
             case RUN_ALL_ON_EMPTY_CHANGESET ->
-                    "runAllIfNoMatches=true — no changed files detected";
+                    "runAllIfNoMatches=true / onEmptyDiff=FULL_SUITE — no changed files detected";
             case RUN_ALL_IF_NO_MATCHES ->
-                    "runAllIfNoMatches=true — no affected tests discovered";
+                    "runAllIfNoMatches=true / onDiscoveryEmpty=FULL_SUITE — no affected tests discovered";
+            case RUN_ALL_ON_ALL_FILES_IGNORED ->
+                    "onAllFilesIgnored=FULL_SUITE — every changed file matched ignorePaths";
+            case RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE ->
+                    "onAllFilesOutOfScope=FULL_SUITE — every changed file sat under out-of-scope dirs";
             case NONE -> throw new IllegalStateException(
                     "describeEscalation must not be called for EscalationReason.NONE; "
                             + "the engine should only produce NONE on non-runAll results");
