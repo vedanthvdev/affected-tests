@@ -281,6 +281,37 @@ public abstract class AffectedTestTask extends DefaultTask {
     public abstract Property<String> getOnDiscoveryEmpty();
 
     /**
+     * Action to take when discovery ran but one or more scanned Java files
+     * failed to parse (see {@link Situation#DISCOVERY_INCOMPLETE}). One of
+     * {@code "selected"}, {@code "full_suite"}, {@code "skipped"}. Unset
+     * falls through to the {@link Mode} default (CI and STRICT escalate
+     * to {@code full_suite}; LOCAL keeps the partial selection).
+     *
+     * @return the on-discovery-incomplete property
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<String> getOnDiscoveryIncomplete();
+
+    /**
+     * Wall-clock timeout (in seconds) for the nested {@code ./gradlew}
+     * invocation that runs the affected / full test suite. {@code 0}
+     * disables the timeout (pre-v1.9.22 default: wait indefinitely).
+     * Positive values deadline the child: the task destroys the
+     * process tree after the interval and fails the build.
+     *
+     * <p>Kept {@link org.gradle.api.tasks.Optional @Optional} so that
+     * zero-config callers skip the timeout entirely — opting in is
+     * explicit. Must be {@code >= 0}; the core config builder rejects
+     * negative values at build-config time.
+     *
+     * @return the gradlew timeout property in seconds
+     */
+    @Input
+    @org.gradle.api.tasks.Optional
+    public abstract Property<Long> getGradlewTimeoutSeconds();
+
+    /**
      * When {@code true}, the task prints the full decision trace
      * (buckets, situation, action, action source) and exits without
      * running any tests. Used by operators to answer "why did this MR
@@ -394,7 +425,8 @@ public abstract class AffectedTestTask extends DefaultTask {
         executeTests(projectDir,
                 result.testClassFqns(),
                 result.testFqnToPath(),
-                result.runAll());
+                result.runAll(),
+                config.gradlewTimeoutSeconds());
     }
 
     /**
@@ -451,6 +483,12 @@ public abstract class AffectedTestTask extends DefaultTask {
         if (getOnDiscoveryEmpty().isPresent()) {
             builder.onDiscoveryEmpty(parseAction(getOnDiscoveryEmpty().get(), "onDiscoveryEmpty"));
         }
+        if (getOnDiscoveryIncomplete().isPresent()) {
+            builder.onDiscoveryIncomplete(parseAction(getOnDiscoveryIncomplete().get(), "onDiscoveryIncomplete"));
+        }
+        if (getGradlewTimeoutSeconds().isPresent()) {
+            builder.gradlewTimeoutSeconds(getGradlewTimeoutSeconds().get());
+        }
         return builder.build();
     }
 
@@ -483,7 +521,8 @@ public abstract class AffectedTestTask extends DefaultTask {
     private void executeTests(Path projectDir,
                               Set<String> testFqns,
                               Map<String, Path> fqnToPath,
-                              boolean runAll) {
+                              boolean runAll,
+                              long gradlewTimeoutSeconds) {
         String gradleCommand = resolveGradleCommand(projectDir);
 
         List<String> args = new ArrayList<>();
@@ -602,14 +641,215 @@ public abstract class AffectedTestTask extends DefaultTask {
         args.add("-x");
         args.add("compileJava");
 
+        int exitCode = (gradlewTimeoutSeconds > 0)
+                ? runWithTimeout(args, projectDir, gradlewTimeoutSeconds)
+                : runWithoutTimeout(args, projectDir);
+
+        if (exitCode != 0) {
+            throw new GradleException("Test execution failed with exit code " + exitCode);
+        }
+    }
+
+    /**
+     * Pre-v1.9.22 dispatch path: hand the argv to Gradle's
+     * {@link ExecOperations} and wait for the child to finish with no
+     * deadline. Kept as the default because {@link ExecOperations}
+     * integrates with the outer Gradle build's log capture and build-
+     * scan infrastructure in ways {@link ProcessBuilder} cannot match
+     * from a plugin.
+     */
+    private int runWithoutTimeout(List<String> args, Path projectDir) {
         ExecResult execResult = getExecOperations().exec(spec -> {
             spec.commandLine(args);
             spec.workingDir(projectDir.toFile());
             spec.setIgnoreExitValue(true);
         });
+        return execResult.getExitValue();
+    }
 
-        if (execResult.getExitValue() != 0) {
-            throw new GradleException("Test execution failed with exit code " + execResult.getExitValue());
+    /**
+     * Watchdog dispatch path used when
+     * {@code affectedTests.gradlewTimeoutSeconds} is set to a positive
+     * value. Spawns the child via {@link ProcessBuilder} (so we can
+     * hold a {@link Process} handle and call {@link Process#destroyForcibly()}),
+     * {@code inheritIO()}'s stdin/stdout/stderr so the user still sees
+     * the nested Gradle output in real time, and enforces a wall-clock
+     * deadline.
+     *
+     * <p>Termination ladder on timeout:
+     * <ol>
+     *   <li>{@link Process#destroy()} — polite SIGTERM; most JVMs react
+     *       to this within a second or two, which gives the test
+     *       runner a chance to flush coverage reports / screenshots
+     *       instead of leaving them half-written.</li>
+     *   <li>Wait {@value #TIMEOUT_GRACEFUL_SHUTDOWN_SECONDS}s for the
+     *       polite stop to land.</li>
+     *   <li>Fall back to {@link Process#destroyForcibly()} — SIGKILL —
+     *       so a child that swallowed the SIGTERM cannot keep holding
+     *       the CI worker hostage.</li>
+     *   <li>Give the kernel another
+     *       {@value #TIMEOUT_FORCIBLE_SHUTDOWN_SECONDS}s to reap the
+     *       process and fail the build either way.</li>
+     * </ol>
+     *
+     * <p>Process-tree semantics: {@code ./gradlew} almost always
+     * connects to a shared Gradle daemon JVM, so the wrapper process
+     * is the parent of the daemon only transiently; the test JVM
+     * that's actually hung lives as a grandchild (shared daemon) or
+     * a sibling (daemon reused across invocations). Killing only the
+     * wrapper would therefore leave the hung workload running and
+     * defeat the whole point of this knob. {@link #shutdownChild}
+     * snapshots {@link ProcessHandle#descendants()} before the first
+     * signal and {@code destroyForcibly}-es every still-live
+     * descendant on the forcible leg. Operators who want a true
+     * "no grace period, no daemon reuse" deadline can pass
+     * {@code --no-daemon} at the outer build level.
+     *
+     * <p>Interrupt handling: if the outer Gradle build is cancelled
+     * (Ctrl-C, Gradle daemon shutdown), the watchdog propagates the
+     * cancellation by {@code destroyForcibly}-ing the wrapper and
+     * every snapshotted descendant, then re-asserts the interrupt
+     * on the caller thread.
+     */
+    // Package-private so AffectedTestTaskTimeoutTest can drive the
+    // watchdog directly against a controllable child process. The
+    // outer `executeTests` caller is still the only production call
+    // site; exposing at package level is the smallest surface that
+    // lets the regression test pin the kill-ladder behaviour without
+    // rebuilding a DefaultTask harness.
+    int runWithTimeout(List<String> args, Path projectDir, long timeoutSeconds) {
+        ProcessBuilder pb = new ProcessBuilder(args);
+        pb.directory(projectDir.toFile());
+        // Inherit stdin/stdout/stderr so the child's output (Gradle's
+        // test task output, test report progress, etc.) streams to
+        // the operator's terminal exactly as it did on the
+        // ExecOperations path. We trade build-scan stream capture
+        // for the ability to kill the child on timeout; opting in to
+        // the timeout is opting in to that trade.
+        pb.inheritIO();
+        Process process;
+        try {
+            process = pb.start();
+        } catch (java.io.IOException e) {
+            throw new GradleException(
+                    "Affected Tests: failed to spawn nested Gradle invocation for timeout dispatch: "
+                            + LogSanitizer.sanitize(e.getMessage()),
+                    e);
+        }
+        try {
+            boolean finished = process.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
+            if (finished) {
+                return process.exitValue();
+            }
+            getLogger().error(
+                    "Affected Tests: nested Gradle invocation exceeded configured timeout of {}s; "
+                            + "terminating the child process tree.",
+                    timeoutSeconds);
+            shutdownChild(process);
+            throw new GradleException(
+                    "Affected Tests: nested Gradle invocation exceeded the configured timeout of "
+                            + timeoutSeconds + "s (affectedTests.gradlewTimeoutSeconds). "
+                            + "The child process has been terminated. Raise the timeout or "
+                            + "investigate a hung test — see the output above for progress.");
+        } catch (InterruptedException e) {
+            // Outer build was cancelled or the daemon is shutting down.
+            // Kill the whole tree immediately so we do not leave
+            // orphaned Gradle daemons / test JVMs on the runner, then
+            // re-assert the interrupt so Gradle's own shutdown path
+            // can continue. Snapshotting descendants before
+            // destroyForcibly on the wrapper mirrors shutdownChild —
+            // once the wrapper exits, re-parented daemons become
+            // unreachable from process.descendants().
+            List<ProcessHandle> descendants = process.descendants()
+                    .collect(Collectors.toList());
+            process.destroyForcibly();
+            for (ProcessHandle child : descendants) {
+                if (child.isAlive()) {
+                    child.destroyForcibly();
+                }
+            }
+            Thread.currentThread().interrupt();
+            throw new GradleException(
+                    "Affected Tests: nested Gradle invocation interrupted before completion.", e);
+        }
+    }
+
+    private static final int TIMEOUT_GRACEFUL_SHUTDOWN_SECONDS = 10;
+    private static final int TIMEOUT_FORCIBLE_SHUTDOWN_SECONDS = 5;
+
+    /**
+     * Shuts down the child process tree: sends {@link Process#destroy()}
+     * to the wrapper first, waits for a grace period, then escalates
+     * to {@link Process#destroyForcibly()} on the wrapper and every
+     * still-live descendant.
+     *
+     * <p>Killing only the wrapper is not enough because
+     * {@code ./gradlew} connects to a shared Gradle daemon JVM that
+     * outlives the wrapper. On the timeout path the daemon is running
+     * a test JVM — that's the actually-hung process that kept the
+     * runner busy — and if we only reap the wrapper the daemon / test
+     * JVM keep holding the runner hostage, which defeats the entire
+     * point of the watchdog. We therefore snapshot
+     * {@link ProcessHandle#descendants()} before the first signal
+     * (so any daemon / test-JVM grandchildren are captured while
+     * still reachable via the wrapper's process tree) and
+     * {@code destroyForcibly} each descendant on the forcible leg.
+     *
+     * <p>The graceful leg still targets only the wrapper so SIGTERM-
+     * aware test runners get their normal shutdown hook window to
+     * flush coverage reports. Descendants are then reaped
+     * {@code destroyForcibly} regardless of whether the wrapper
+     * exited gracefully or had to be SIGKILLed, because a SIGTERM-
+     * responsive wrapper (plain {@code sh}, most test runners)
+     * exits on its own but leaves its children re-parented to
+     * pid 1 — those grandchildren are the real hung workload and
+     * would keep holding the CI worker hostage otherwise. Operators
+     * who need "hard cutoff, no grace" semantics can still run the
+     * outer build with {@code --no-daemon}, which re-parents the
+     * test JVM as a direct child of the wrapper and makes the polite
+     * leg already effective against the daemon too.
+     */
+    private void shutdownChild(Process process) {
+        // Snapshot the descendant tree before we signal — once the
+        // wrapper exits the grandchildren may re-parent to pid 1 and
+        // {@link ProcessHandle#descendants()} on the wrapper will
+        // return empty, leaving orphaned Gradle daemons alive.
+        List<ProcessHandle> descendants = process.descendants()
+                .collect(Collectors.toList());
+        process.destroy();
+        try {
+            if (!process.waitFor(TIMEOUT_GRACEFUL_SHUTDOWN_SECONDS,
+                    java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                // Best-effort wait — if SIGKILL itself does not reap
+                // the child within this window something is deeply
+                // wrong with the host, but we still want to return
+                // to the caller so the build can fail cleanly rather
+                // than hang here forever.
+                process.waitFor(TIMEOUT_FORCIBLE_SHUTDOWN_SECONDS,
+                        java.util.concurrent.TimeUnit.SECONDS);
+            }
+            // Reap any still-live descendants regardless of whether
+            // the wrapper exited gracefully or had to be SIGKILLed.
+            // A SIGTERM-responsive wrapper (plain `sh`, most test
+            // runners) exits on destroy() but leaves its children
+            // (daemon / test JVM) re-parented to pid 1 — those
+            // grandchildren are the real hung workload and would
+            // keep holding the CI worker hostage if we returned
+            // here without reaping them.
+            for (ProcessHandle child : descendants) {
+                if (child.isAlive()) {
+                    child.destroyForcibly();
+                }
+            }
+        } catch (InterruptedException e) {
+            process.destroyForcibly();
+            for (ProcessHandle child : descendants) {
+                if (child.isAlive()) {
+                    child.destroyForcibly();
+                }
+            }
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -789,6 +1029,8 @@ public abstract class AffectedTestTask extends DefaultTask {
                     "onAllFilesIgnored=FULL_SUITE — every changed file matched ignorePaths";
             case RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE ->
                     "onAllFilesOutOfScope=FULL_SUITE — every changed file sat under out-of-scope dirs";
+            case RUN_ALL_ON_DISCOVERY_INCOMPLETE ->
+                    "onDiscoveryIncomplete=FULL_SUITE — discovery observed unparseable Java files, selection may be incomplete";
             case NONE -> throw new IllegalStateException(
                     "describeEscalation must not be called for EscalationReason.NONE; "
                             + "the engine should only produce NONE on non-runAll results");
@@ -939,9 +1181,11 @@ public abstract class AffectedTestTask extends DefaultTask {
      * package-private so the explain-format tests can pin the exact
      * conditions without spinning up Gradle.
      *
-     * <p>Gate: only {@link Situation#DISCOVERY_SUCCESS} and
-     * {@link Situation#DISCOVERY_EMPTY} can have been influenced by an
-     * out-of-scope pattern. The other four situations reach their
+     * <p>Gate: only {@link Situation#DISCOVERY_SUCCESS},
+     * {@link Situation#DISCOVERY_EMPTY}, and {@link Situation#DISCOVERY_INCOMPLETE}
+     * can have been influenced by an out-of-scope pattern — all three
+     * run the mapper over the full diff and only then route post-
+     * discovery. The other four situations reach their
      * outcome for reasons the out-of-scope bucket cannot change:
      * {@link Situation#EMPTY_DIFF} (no files to match),
      * {@link Situation#ALL_FILES_IGNORED} (ignore wins before
@@ -963,7 +1207,8 @@ public abstract class AffectedTestTask extends DefaultTask {
                                      AffectedTestsResult result) {
         Situation situation = result.situation();
         if (situation != Situation.DISCOVERY_SUCCESS
-                && situation != Situation.DISCOVERY_EMPTY) {
+                && situation != Situation.DISCOVERY_EMPTY
+                && situation != Situation.DISCOVERY_INCOMPLETE) {
             return;
         }
         if (result.changedFiles().isEmpty()) {
@@ -1022,11 +1267,20 @@ public abstract class AffectedTestTask extends DefaultTask {
      * referencing another doc.
      */
     private static List<Situation> situationOrder() {
+        // Mirrors the engine's evaluation order in
+        // {@link io.affectedtests.core.AffectedTestsEngine#run()}:
+        // DISCOVERY_INCOMPLETE short-circuits before DISCOVERY_EMPTY /
+        // DISCOVERY_SUCCESS whenever parseFailureCount > 0. The
+        // --explain trace has to list the situations in the same
+        // order an operator reads the engine logs, otherwise the
+        // matrix reads as a lie when a parse-failure run elides
+        // DISCOVERY_EMPTY.
         return List.of(
                 Situation.EMPTY_DIFF,
                 Situation.ALL_FILES_IGNORED,
                 Situation.ALL_FILES_OUT_OF_SCOPE,
                 Situation.UNMAPPED_FILE,
+                Situation.DISCOVERY_INCOMPLETE,
                 Situation.DISCOVERY_EMPTY,
                 Situation.DISCOVERY_SUCCESS
         );
@@ -1085,7 +1339,7 @@ public abstract class AffectedTestTask extends DefaultTask {
                     prefix + "{} changed file(s); {}.",
                     new Object[] {
                             result.changedFiles().size(),
-                            describeSkipReason(result.situation())
+                            describeSkipReason(result.situation(), result.action())
                     });
         }
         return new LogLine(
@@ -1100,16 +1354,31 @@ public abstract class AffectedTestTask extends DefaultTask {
     /**
      * Renders a {@link Situation} as a short human-readable phrase
      * suitable for the summary line's {@code SKIPPED} branch. Only the
-     * five "ambiguous" situations can legitimately resolve to
+     * ambiguous situations can legitimately resolve to
      * {@link Action#SKIPPED}; {@link Situation#DISCOVERY_SUCCESS} is
      * rejected because the engine never skips when it found tests.
+     *
+     * <p>Takes the resolved {@link Action} because one situation
+     * ({@link Situation#DISCOVERY_INCOMPLETE}) can legitimately reach
+     * the "skipped" rendering path with {@code SELECTED} as well as
+     * {@code SKIPPED}. The engine routes
+     * {@code DISCOVERY_INCOMPLETE + SELECTED} with an empty selection
+     * through the skipped-summary branch in the task summary (the
+     * `skipped` flag is set by {@link io.affectedtests.core.AffectedTestsEngine#emptyResult}
+     * whenever a non-SUCCESS situation winds up with zero tests),
+     * so a situation-only rendering would print the {@code SKIPPED}
+     * literal for a run the user actually configured as {@code SELECTED}.
+     * Branching on the action keeps the phrase truthful without
+     * requiring operators to reconcile two different action labels
+     * in the same summary line.
      *
      * <p>Package-private so {@code AffectedTestTaskLogFormatTest} can
      * pin the exact wording — mirrors {@link #describeEscalation} so
      * the two halves of the summary log share one vocabulary.
      */
-    static String describeSkipReason(Situation situation) {
+    static String describeSkipReason(Situation situation, Action action) {
         Objects.requireNonNull(situation, "situation");
+        Objects.requireNonNull(action, "action");
         return switch (situation) {
             case EMPTY_DIFF ->
                     "no changed files detected";
@@ -1121,6 +1390,9 @@ public abstract class AffectedTestTask extends DefaultTask {
                     "onUnmappedFile=SKIPPED — non-Java or unmapped file in diff";
             case DISCOVERY_EMPTY ->
                     "no affected tests discovered";
+            case DISCOVERY_INCOMPLETE -> action == Action.SELECTED
+                    ? "onDiscoveryIncomplete=SELECTED — no affected tests matched the parsed files"
+                    : "onDiscoveryIncomplete=SKIPPED — discovery observed unparseable files";
             case DISCOVERY_SUCCESS -> throw new IllegalStateException(
                     "describeSkipReason must not be called for DISCOVERY_SUCCESS; "
                             + "the engine only produces that situation on a non-empty "

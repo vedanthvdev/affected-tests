@@ -85,6 +85,8 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getOnAllFilesOutOfScope().set(extension.getOnAllFilesOutOfScope());
             task.getOnUnmappedFile().set(extension.getOnUnmappedFile());
             task.getOnDiscoveryEmpty().set(extension.getOnDiscoveryEmpty());
+            task.getOnDiscoveryIncomplete().set(extension.getOnDiscoveryIncomplete());
+            task.getGradlewTimeoutSeconds().set(extension.getGradlewTimeoutSeconds());
 
             task.getRootDir().set(rootDir);
             task.getSubprojectPaths().set(project.provider(() -> collectSubprojectPaths(rootProject)));

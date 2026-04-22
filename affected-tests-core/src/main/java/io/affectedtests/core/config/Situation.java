@@ -6,13 +6,14 @@ package io.affectedtests.core.config;
  * {@link Action} via the per-situation config in
  * {@link AffectedTestsConfig}.
  *
- * <p>The six situations are deliberately exhaustive and mutually exclusive,
+ * <p>The seven situations are deliberately exhaustive and mutually exclusive,
  * so a human reading the {@code --explain} output never has to reconstruct
  * which of several overlapping "safety net" branches the engine actually
  * took. The priority in {@link io.affectedtests.core.AffectedTestsEngine}
  * evaluates them in a fixed order — empty diff, all-ignored,
- * all-out-of-scope, unmapped, discovery — so any diff maps to a single
- * situation even when it nominally touches several buckets.
+ * all-out-of-scope, unmapped, discovery-incomplete, discovery-empty,
+ * discovery-success — so any diff maps to a single situation even when it
+ * nominally touches several buckets.
  *
  * <p>Note: {@link io.affectedtests.core.mapping.PathToClassMapper} already
  * routes a file to at most one of its buckets (ignore, out-of-scope,
@@ -57,6 +58,39 @@ public enum Situation {
      * the post-discovery counterpart to {@link #EMPTY_DIFF}.
      */
     DISCOVERY_EMPTY,
+
+    /**
+     * Discovery ran but at least one scanned Java file failed to parse, so
+     * the selection (empty or non-empty) is known to be under-reported. The
+     * engine routes here in preference to {@link #DISCOVERY_EMPTY} /
+     * {@link #DISCOVERY_SUCCESS} whenever
+     * {@link io.affectedtests.core.discovery.ProjectIndex#parseFailureCount()}
+     * is non-zero.
+     *
+     * <p>Motivating class of bug: a test file using a Java language level
+     * newer than {@link io.affectedtests.core.discovery.JavaParsers} knows
+     * about (or genuinely malformed source) produces {@code null} from
+     * {@code JavaParsers.parseOrWarn} and silently drops out of usage /
+     * transitive discovery. Before v1.9.22 the only surfacing was a WARN
+     * at parse time; the engine still routed through {@code DISCOVERY_EMPTY}
+     * or {@code DISCOVERY_SUCCESS}, and a caller grepping the
+     * {@code Situation} could not tell "nothing matched" from "matching
+     * failed because we couldn't read half the files". That asymmetry is
+     * especially dangerous on merge-gate runs: the caller is optimising
+     * test runtime, the parse failure silently under-selects, and the
+     * lost coverage only shows up on main.
+     *
+     * <p>Defaults in the {@link AffectedTestsConfig} resolver are
+     * conservative on purpose: {@link Mode#CI} and {@link Mode#STRICT}
+     * escalate to {@link Action#FULL_SUITE}, {@link Mode#LOCAL} stays on
+     * {@link Action#SELECTED} (dev sees the WARN and decides), and the
+     * legacy {@code runAllIfNoMatches=true} shim also escalates — it is
+     * the closest existing boolean to "I don't trust a no-signal result".
+     * The hardcoded pre-v2 default is {@link Action#SELECTED} so
+     * zero-config callers upgrading from v1.9.21 do not experience a
+     * behaviour change.
+     */
+    DISCOVERY_INCOMPLETE,
 
     /** Discovery ran and produced a non-empty test selection. */
     DISCOVERY_SUCCESS

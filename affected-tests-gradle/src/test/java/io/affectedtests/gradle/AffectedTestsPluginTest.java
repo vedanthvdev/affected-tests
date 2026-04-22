@@ -102,4 +102,47 @@ class AffectedTestsPluginTest {
         assertFalse(task.getRunAllOnNonJavaChange().get(),
                 "Task input must reflect the extension's runAllOnNonJavaChange override");
     }
+
+    @Test
+    void extensionExposesOnDiscoveryIncompleteAndGradlewTimeout() {
+        // Regression for B6-#9 + B6-#11 DSL wiring: missing setters
+        // in AffectedTestsExtension would compile-break the build but
+        // a typo between the extension and the task ( `getOnDiscoveryIncomplete`
+        // vs `getOnDiscoveryIncompleteAction`) would only show up at
+        // runtime when a user configured the DSL. Pin the names and
+        // round-trip the values so that refactor doesn't silently
+        // drop the wiring.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestsExtension ext = project.getExtensions()
+                .getByType(AffectedTestsExtension.class);
+        ext.getOnDiscoveryIncomplete().set("SKIPPED");
+        ext.getGradlewTimeoutSeconds().set(1800L);
+
+        AffectedTestTask task = (AffectedTestTask) project.getTasks().findByName("affectedTest");
+        assertNotNull(task);
+        assertEquals("SKIPPED", task.getOnDiscoveryIncomplete().get(),
+                "Task must expose the extension's onDiscoveryIncomplete setting byte-for-byte");
+        assertEquals(1800L, task.getGradlewTimeoutSeconds().get(),
+                "Task must expose the extension's gradlewTimeoutSeconds setting byte-for-byte");
+    }
+
+    @Test
+    void gradlewTimeoutAndDiscoveryIncompleteAreUnconfiguredByDefault() {
+        // Defaults must stay absent — presence-based defaulting is how
+        // the core config builder distinguishes "user didn't say"
+        // (fall through to mode defaults) from "user set 0" (explicit
+        // no-timeout). Installing a convention would collapse those
+        // two cases and silently change mode-default behaviour.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestsExtension ext = project.getExtensions()
+                .getByType(AffectedTestsExtension.class);
+        assertFalse(ext.getOnDiscoveryIncomplete().isPresent(),
+                "onDiscoveryIncomplete must have no convention so the core resolver picks the mode default");
+        assertFalse(ext.getGradlewTimeoutSeconds().isPresent(),
+                "gradlewTimeoutSeconds must have no convention so the task branch between watchdog/exec paths stays correct");
+    }
 }

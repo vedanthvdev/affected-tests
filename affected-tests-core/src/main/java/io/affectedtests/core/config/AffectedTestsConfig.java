@@ -63,6 +63,7 @@ public final class AffectedTestsConfig {
     private final List<String> outOfScopeSourceDirs;
     private final boolean includeImplementationTests;
     private final List<String> implementationNaming;
+    private final long gradlewTimeoutSeconds;
     private final Mode mode;
     private final Mode effectiveMode;
     private final Map<Situation, Action> situationActions;
@@ -80,6 +81,11 @@ public final class AffectedTestsConfig {
         this.testDirs = List.copyOf(builder.testDirs);
         this.includeImplementationTests = builder.includeImplementationTests;
         this.implementationNaming = List.copyOf(builder.implementationNaming);
+        // Zero = no timeout, preserving the pre-v1.9.22 "wait forever"
+        // behaviour for zero-config callers. Negative values are
+        // rejected at the builder gate below; see
+        // {@link Builder#gradlewTimeoutSeconds(long)}.
+        this.gradlewTimeoutSeconds = builder.gradlewTimeoutSeconds;
 
         // Resolve the paths-to-ignore list. Precedence matches the doc:
         // explicit ignorePaths() > explicit excludePaths() > builder default.
@@ -224,6 +230,21 @@ public final class AffectedTestsConfig {
                 b.onUnmappedFile, legacyNonJava, effectiveMode, Action.FULL_SUITE);
         resolveInto(actions, sources, Situation.DISCOVERY_EMPTY,
                 b.onDiscoveryEmpty, legacyNoMatches, effectiveMode, Action.SKIPPED);
+        // No legacy boolean maps to DISCOVERY_INCOMPLETE — the situation
+        // did not exist pre-v1.9.22, so there is nothing to translate
+        // and there is no pre-v2 behaviour to preserve. Wiring the
+        // {@code runAllIfNoMatches} shim in here would silently fight
+        // the CI / STRICT safety-net guarantee documented in the
+        // {@link Situation#DISCOVERY_INCOMPLETE} javadoc: a user who
+        // set {@code mode=CI} plus {@code runAllIfNoMatches=false}
+        // would get SKIPPED on parse failures, which is the opposite
+        // of what the doc promises. The hard-coded fallback is
+        // {@link Action#SELECTED}, matching the LOCAL-mode default
+        // and mirroring the {@link Situation#ALL_FILES_OUT_OF_SCOPE}
+        // wiring (another v2-only situation that passes {@code null}
+        // for the legacy argument).
+        resolveInto(actions, sources, Situation.DISCOVERY_INCOMPLETE,
+                b.onDiscoveryIncomplete, null, effectiveMode, Action.SELECTED);
         // DISCOVERY_SUCCESS is definitionally SELECTED — there is no
         // other sensible outcome when discovery returns tests. Making
         // it configurable would let users set "discovery ran, found
@@ -273,16 +294,27 @@ public final class AffectedTestsConfig {
             case LOCAL -> switch (s) {
                 case EMPTY_DIFF, ALL_FILES_IGNORED, ALL_FILES_OUT_OF_SCOPE, DISCOVERY_EMPTY -> Action.SKIPPED;
                 case UNMAPPED_FILE -> Action.FULL_SUITE;
-                case DISCOVERY_SUCCESS -> Action.SELECTED;
+                // LOCAL is the dev-iteration profile: surfacing the WARN
+                // at parse time is enough feedback, and forcing a full
+                // suite on every parse hiccup would make the wrapper
+                // unusable while mid-edit. The dev can re-run after
+                // fixing the offending file.
+                case DISCOVERY_INCOMPLETE, DISCOVERY_SUCCESS -> Action.SELECTED;
             };
             case CI -> switch (s) {
                 case EMPTY_DIFF, ALL_FILES_IGNORED, ALL_FILES_OUT_OF_SCOPE -> Action.SKIPPED;
-                case UNMAPPED_FILE, DISCOVERY_EMPTY -> Action.FULL_SUITE;
+                // Parse failures on a CI merge-gate are the exact situation
+                // the safety net exists for: we cannot prove coverage, so
+                // default to running everything. Operators who know their
+                // trees have transient parse noise can override with
+                // {@code onDiscoveryIncomplete = "selected"}.
+                case UNMAPPED_FILE, DISCOVERY_EMPTY, DISCOVERY_INCOMPLETE -> Action.FULL_SUITE;
                 case DISCOVERY_SUCCESS -> Action.SELECTED;
             };
             case STRICT -> switch (s) {
                 case ALL_FILES_OUT_OF_SCOPE -> Action.SKIPPED;
-                case EMPTY_DIFF, ALL_FILES_IGNORED, UNMAPPED_FILE, DISCOVERY_EMPTY -> Action.FULL_SUITE;
+                case EMPTY_DIFF, ALL_FILES_IGNORED, UNMAPPED_FILE, DISCOVERY_EMPTY,
+                     DISCOVERY_INCOMPLETE -> Action.FULL_SUITE;
                 case DISCOVERY_SUCCESS -> Action.SELECTED;
             };
             case AUTO -> throw new IllegalStateException(
@@ -313,6 +345,33 @@ public final class AffectedTestsConfig {
     public List<String> testSuffixes() { return testSuffixes; }
     public List<String> sourceDirs() { return sourceDirs; }
     public List<String> testDirs() { return testDirs; }
+
+    /**
+     * Hard wall-clock timeout applied to the nested {@code ./gradlew}
+     * invocation that runs the affected / full test suite. Zero means
+     * "no timeout" (the pre-v1.9.22 default — wait for the child to
+     * finish no matter how long it takes); any positive value is the
+     * deadline in seconds, after which the Gradle task destroys the
+     * child process tree and fails with a clear error.
+     *
+     * <p>Motivating class of bug: CI workers pinned for hours on a
+     * hung JVM or a stuck test — usually a deadlocked custom test
+     * harness, an exhausted Docker fixture, or a JDK agent that
+     * mis-responds to {@code SIGTERM}. Without a timeout the plugin
+     * has no way to surface the stall, so the only feedback is a
+     * pipeline that times out at the CI runner level with no mapping
+     * back to which test got stuck.
+     *
+     * <p>Recommended values: {@code 1800} (30 min) for merge-gate
+     * unit-test runs, {@code 3600} (1 hour) for suites that include
+     * integration tests, {@code 0} for local runs where the operator
+     * wants to attach a debugger and has infinite patience. Must be
+     * {@code >= 0}; negative values are rejected at build time.
+     *
+     * @return the wall-clock timeout in seconds, or {@code 0} when
+     *         disabled
+     */
+    public long gradlewTimeoutSeconds() { return gradlewTimeoutSeconds; }
 
     /**
      * Glob patterns for files that must not influence test selection at all.
@@ -515,6 +574,11 @@ public final class AffectedTestsConfig {
         // silently dropped tests for every "Default"-prefixed impl in the
         // wild on zero-config installs.
         private List<String> implementationNaming = List.of("Impl", "Default");
+        // 0 = no timeout (matches pre-v1.9.22 behaviour, wait forever).
+        // Positive values are wall-clock seconds before the nested
+        // ./gradlew child process is destroyed. Validated at the
+        // setter; negative values throw IllegalArgumentException.
+        private long gradlewTimeoutSeconds = 0L;
 
         private Mode mode;
         private Action onEmptyDiff;
@@ -522,6 +586,7 @@ public final class AffectedTestsConfig {
         private Action onAllFilesOutOfScope;
         private Action onUnmappedFile;
         private Action onDiscoveryEmpty;
+        private Action onDiscoveryIncomplete;
 
         public Builder baseRef(String baseRef) {
             if (baseRef == null || baseRef.isBlank()) {
@@ -693,6 +758,32 @@ public final class AffectedTestsConfig {
             return this;
         }
 
+        /**
+         * Sets the wall-clock deadline for the nested {@code ./gradlew}
+         * invocation. {@code 0} disables the timeout (pre-v1.9.22
+         * default — wait indefinitely). Any positive value is seconds
+         * to wait before the Gradle task destroys the child process and
+         * fails with a clear error.
+         *
+         * <p>Negative values are rejected — the single pre-computed
+         * policy decision here is "there is no such thing as a negative
+         * deadline". Clamping to zero would hide a misconfigured
+         * Groovy/Kotlin DSL expression; throwing forces the user to see
+         * it at build-config time.
+         *
+         * @param v the timeout in seconds; must be {@code >= 0}
+         * @return this builder
+         * @throws IllegalArgumentException if {@code v} is negative
+         */
+        public Builder gradlewTimeoutSeconds(long v) {
+            if (v < 0) {
+                throw new IllegalArgumentException(
+                        "gradlewTimeoutSeconds must be >= 0 (0 disables the timeout); got " + v);
+            }
+            this.gradlewTimeoutSeconds = v;
+            return this;
+        }
+
         public Builder mode(Mode v) {
             this.mode = Objects.requireNonNull(v, "mode must not be null");
             return this;
@@ -715,6 +806,10 @@ public final class AffectedTestsConfig {
         }
         public Builder onDiscoveryEmpty(Action v) {
             this.onDiscoveryEmpty = Objects.requireNonNull(v, "onDiscoveryEmpty must not be null");
+            return this;
+        }
+        public Builder onDiscoveryIncomplete(Action v) {
+            this.onDiscoveryIncomplete = Objects.requireNonNull(v, "onDiscoveryIncomplete must not be null");
             return this;
         }
 

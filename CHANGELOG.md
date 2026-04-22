@@ -6,6 +6,113 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — discovery-incomplete signal + nested `gradlew` timeout (v1.9.22)
+
+The two deferred findings from the v1.9.21 reliability batch: both close
+long-tail silent-failure modes that could leave an operator convinced a
+merge-gate run was green when it was in fact half-blind or stuck.
+
+- **`Situation.DISCOVERY_INCOMPLETE` now fires whenever any scanned Java
+  file fails to parse.** Before this release, `JavaParsers.parseOrWarn`
+  emitted a `WARN` and returned `null`, and the strategy call site
+  silently continued — the dispatch map was built from whatever happened
+  to parse. For a branch with one mid-refactor syntax error that meant
+  `DISCOVERY_SUCCESS` with a quietly-shrunk selection, which is exactly
+  the scenario where the merge-gate safety net needs to pay out.
+  `ProjectIndex#compilationUnit` now increments a per-run
+  `parseFailureCount` at the cache boundary (de-duplicated across
+  strategies — a file that fails to parse once counts once, no matter
+  how many of naming / usage / implementation / transitive ask for it).
+  `AffectedTestsEngine#run` consults that count after discovery and
+  routes through the new situation before the old `DISCOVERY_EMPTY` /
+  `DISCOVERY_SUCCESS` branches. The mode-default resolution matches the
+  existing asymmetry — `CI` and `STRICT` escalate to `FULL_SUITE`
+  (safety wins over speed on merge-gate runs), `LOCAL` stays on
+  `SELECTED` (iteration speed wins for the developer actively editing
+  the broken file, who already has the `WARN` in their terminal). The
+  new knob is configurable via the Gradle DSL:
+  ```groovy
+  affectedTests {
+      onDiscoveryIncomplete = "FULL_SUITE" // or "SELECTED" / "SKIPPED"
+  }
+  ```
+  A matching `EscalationReason.RUN_ALL_ON_DISCOVERY_INCOMPLETE` feeds
+  `--explain` and the `affectedTest` task's skip-reason / escalation
+  copy so operators can tell at a glance whether a full-suite run was
+  triggered by an empty diff, an unmapped file, or a parse failure.
+  Regression coverage:
+    - `ProjectIndexTest.parseFailureCountIncrementsOnUnparseableFile`
+      pins the cache-boundary counting contract and the de-duplication
+      behaviour (three calls on the same broken file still count as
+      one failure).
+    - `AffectedTestsEngineTest.discoveryIncompleteEscalatesToFullSuiteInCI`
+      and `discoveryIncompleteStillSelectsInLocalMode` pin the
+      CI-vs-LOCAL asymmetry.
+    - `discoveryIncompleteRespectsExplicitOnDiscoveryIncompleteOverride`
+      pins the explicit-wins-over-mode tier.
+    - Three `AffectedTestsConfigTest` cases pin the mode defaults for
+      `CI`, `LOCAL`, and `STRICT` so a future refactor of the resolver
+      can't silently bump zero-config users.
+- **New `affectedTests.gradlewTimeoutSeconds` knob deadlines the nested
+  `./gradlew` invocation.** The task spawns a child `./gradlew :module:test
+  --tests …` for each affected module. Before this release the child
+  was launched via Gradle's `ExecOperations`, which has no timeout
+  surface at all — a hung test kept the CI worker busy until the outer
+  CI-system deadline killed the whole job, which typically surfaces as
+  "pipeline failed with no useful logs" hours later. The new knob is a
+  wall-clock deadline in seconds; `0` (the default) preserves the
+  pre-v1.9.22 "wait forever" behaviour for zero-config callers so the
+  upgrade is safe. Positive values branch the task onto a `ProcessBuilder`
+  watchdog path: the child still streams its output to the operator's
+  terminal via `inheritIO()`, and on timeout the task runs a polite
+  `destroy()` on the wrapper → 10-second grace → `destroyForcibly()`
+  on both the wrapper and every snapshotted descendant (shared Gradle
+  daemons, test JVMs) → 5-second reap ladder before failing the build
+  with a message that names the setting so the operator knows what to
+  raise. Because `./gradlew` connects to a shared daemon JVM by
+  default, killing only the wrapper would leave the actually-hung
+  test JVM running as a grandchild; the watchdog snapshots
+  `ProcessHandle#descendants()` *before* signalling (once the wrapper
+  exits, re-parented daemons become unreachable from
+  `process.descendants()`) and forcibly destroys every live descendant
+  after the wrapper is reaped, regardless of whether the wrapper
+  itself exited gracefully on `SIGTERM` or had to be `destroyForcibly`
+  escalated. This matters because a SIGTERM-responsive wrapper
+  (plain `sh`, most test runners) exits on `destroy()` but leaves its
+  children re-parented to pid 1 — those grandchildren are the real
+  hung workload and would keep holding the CI worker hostage if the
+  descendants-kill only ran on the forcible leg. Operators who need a
+  hard cutoff with no daemon reuse can pass `--no-daemon` at the
+  outer build level.
+  Outer-build cancellation (Ctrl-C, Gradle daemon shutdown) propagates
+  via the same snapshot-then-destroyForcibly path and re-asserts the
+  interrupt. The trade-off for opting in:
+  the watchdog path uses `inheritIO` instead of `ExecOperations`, so
+  Develocity build-scan stream capture of the child's output is not
+  available on timed runs — callers who rely on scan ingestion of the
+  nested output should leave the knob at `0` and enforce a deadline at
+  the CI-job level instead.   Validation lives at the builder gate:
+  `AffectedTestsConfigTest.gradlewTimeoutRejectsNegativeValues` fails
+  when a user sets `-1` (typoed "no timeout"), and
+  `gradlewTimeoutDefaultsToZero` pins the zero-config default so any
+  future refactor that flips the default breaks loudly instead of
+  retroactively deadline-killing every long-running CI on upgrade.
+  Runtime coverage lives in `AffectedTestTaskTimeoutTest`
+  (POSIX-only): `hungChildIsKilledWithinLadderBudget` pins the ladder
+  budget, `sigtermSwallowingChildEscalatesToForcibleKill` exercises
+  the forcible leg against a `trap '' TERM; sleep 60` wrapper,
+  `successfulChildReturnsExitCodeBeforeTimeout` pins both the happy
+  path and non-zero exit propagation, and
+  `descendantsAreTerminatedNotOnlyTheWrapper` writes the grandchild's
+  PID to a pidfile and asserts via `ProcessHandle.of(pid).isAlive()`
+  that the re-parented `sleep` is reaped — the exact grandchild-
+  survival bug the descendants-kill loop closes. The last test was
+  the one that surfaced the "only the forcible leg kills descendants"
+  regression in the first cut of the fix: if the wrapper exited
+  gracefully on SIGTERM the descendants loop never ran and the
+  orphaned sleep survived. The fix now reaps descendants on both
+  legs.
+
 ### Fixed — tier-1 reliability / safety batch (v1.9.21)
 
 The v1.9.20 batch closed every tier-1 *correctness* bug surfaced by the

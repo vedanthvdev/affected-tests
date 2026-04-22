@@ -234,6 +234,13 @@ class AffectedTestTaskExplainFormatTest {
                 Situation.ALL_FILES_IGNORED,
                 Situation.ALL_FILES_OUT_OF_SCOPE,
                 Situation.UNMAPPED_FILE,
+                // DISCOVERY_INCOMPLETE must appear before
+                // DISCOVERY_EMPTY / DISCOVERY_SUCCESS because the
+                // engine evaluates parse-failure escalation first
+                // (see AffectedTestsEngine#run). Without this ordering
+                // pin the --explain matrix would silently drift to any
+                // row position and stop mirroring the engine.
+                Situation.DISCOVERY_INCOMPLETE,
                 Situation.DISCOVERY_EMPTY,
                 Situation.DISCOVERY_SUCCESS);
         int previous = -1;

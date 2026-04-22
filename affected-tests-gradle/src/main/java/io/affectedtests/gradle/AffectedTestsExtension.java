@@ -257,4 +257,37 @@ public abstract class AffectedTestsExtension {
      * @return the on-discovery-empty property
      */
     public abstract Property<String> getOnDiscoveryEmpty();
+
+    /**
+     * Action to take when discovery ran but at least one scanned Java file
+     * failed to parse — see {@code Situation.DISCOVERY_INCOMPLETE} on the
+     * core module for the full rationale. One of {@code "selected"},
+     * {@code "full_suite"}, {@code "skipped"}.
+     *
+     * <p>Unset falls through to the {@link #getMode() mode} default
+     * (CI and STRICT escalate to {@code full_suite}; LOCAL keeps the
+     * partial selection). The legacy {@code runAllIfNoMatches=true} shim
+     * also maps to {@code full_suite} here because it is the closest
+     * existing signal for "I don't trust a silent no-signal result".
+     *
+     * @return the on-discovery-incomplete property
+     */
+    public abstract Property<String> getOnDiscoveryIncomplete();
+
+    /**
+     * Wall-clock timeout in seconds for the nested {@code ./gradlew}
+     * invocation that executes the affected / full test suite.
+     * {@code 0} disables the timeout (pre-v1.9.22 default — wait
+     * indefinitely). Positive values deadline the child process: the
+     * plugin destroys the process tree after the interval and fails
+     * the build with a clear error.
+     *
+     * <p>Recommended values: {@code 1800} (30 min) for merge-gate
+     * unit-test runs, {@code 3600} (1 hour) for suites that include
+     * integration tests. Must be {@code >= 0}; the core config
+     * builder rejects negative values at build-config time.
+     *
+     * @return the gradlew timeout property in seconds
+     */
+    public abstract Property<Long> getGradlewTimeoutSeconds();
 }

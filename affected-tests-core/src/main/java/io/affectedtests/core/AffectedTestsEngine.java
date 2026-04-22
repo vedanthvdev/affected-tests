@@ -91,7 +91,17 @@ public final class AffectedTestsEngine {
          * action for {@link Situation#ALL_FILES_OUT_OF_SCOPE} resolved to
          * {@link Action#FULL_SUITE}. v2-only.
          */
-        RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE
+        RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE,
+        /**
+         * One or more scanned Java files failed to parse (malformed
+         * source, or a language level beyond {@link io.affectedtests.core.discovery.JavaParsers#LANGUAGE_LEVEL}),
+         * so discovery may have under-reported its selection. The action
+         * for {@link Situation#DISCOVERY_INCOMPLETE} resolved to
+         * {@link Action#FULL_SUITE}, typically via {@link io.affectedtests.core.config.Mode#CI}
+         * or {@link io.affectedtests.core.config.Mode#STRICT} defaults
+         * or an explicit {@code runAllIfNoMatches=true}. v2-only.
+         */
+        RUN_ALL_ON_DISCOVERY_INCOMPLETE
     }
 
     /**
@@ -320,14 +330,57 @@ public final class AffectedTestsEngine {
             }
         }
 
+        // Parse failures during index / strategy walks mean the Usage /
+        // Implementation / Transitive tiers may have silently dropped
+        // tests that actually do reference the changed production code.
+        // Surface that as its own situation so callers can pick a policy
+        // (escalate to FULL_SUITE on CI, keep the partial selection on
+        // LOCAL) instead of routing through DISCOVERY_EMPTY /
+        // DISCOVERY_SUCCESS as if the selection were trustworthy. The
+        // count is de-duplicated inside ProjectIndex so a single
+        // unparseable file is not multi-counted across strategies.
+        int parseFailures = index.parseFailureCount();
+        if (parseFailures > 0) {
+            Action action = config.actionFor(Situation.DISCOVERY_INCOMPLETE);
+            log.warn("Affected Tests: discovery observed {} unparseable Java file(s); "
+                            + "selection may be incomplete. Action: {}. See WARN lines above "
+                            + "for the specific files that failed to parse.",
+                    parseFailures, action);
+            if (action == Action.FULL_SUITE || action == Action.SKIPPED) {
+                return emptyResult(Situation.DISCOVERY_INCOMPLETE, action, changedFiles,
+                        mapping.productionClasses(), mapping.testClasses(), buckets);
+            }
+            // SELECTED: honour the situation but fall through to the
+            // shared empty/selected tail below. The tail now picks the
+            // returned situation based on parseFailures so both the
+            // happy path and this one share one log line ({@code "==="
+            // Result: N affected test classes (SITUATION)}) and one
+            // record construction, instead of two near-identical copies
+            // that will drift.
+        }
+
+        Situation finalSituation = parseFailures > 0
+                ? Situation.DISCOVERY_INCOMPLETE
+                : Situation.DISCOVERY_SUCCESS;
+
         if (allTestsToRun.isEmpty()) {
-            Action action = config.actionFor(Situation.DISCOVERY_EMPTY);
-            log.info("Discovery produced no affected tests. Action: {}.", action);
-            return emptyResult(Situation.DISCOVERY_EMPTY, action, changedFiles,
+            // Shared empty tail. For parseFailures == 0 we report
+            // DISCOVERY_EMPTY (the pre-v1.9.22 branch); for
+            // parseFailures > 0 + SELECTED we report DISCOVERY_INCOMPLETE
+            // so --explain, the skip-reason phrase, and the CI log
+            // grep all see a single truthful situation.
+            Situation emptySituation = parseFailures > 0
+                    ? Situation.DISCOVERY_INCOMPLETE
+                    : Situation.DISCOVERY_EMPTY;
+            Action action = config.actionFor(emptySituation);
+            log.info("Discovery produced no affected tests. Situation: {}, Action: {}.",
+                    emptySituation, action);
+            return emptyResult(emptySituation, action, changedFiles,
                     mapping.productionClasses(), mapping.testClasses(), buckets);
         }
 
-        log.info("=== Result: {} affected test classes ===", allTestsToRun.size());
+        log.info("=== Result: {} affected test classes ({}) ===",
+                allTestsToRun.size(), finalSituation);
         // FQNs are derived from diff filenames by the discovery strategies
         // and have not yet been through the AffectedTestTask#isValidFqn
         // gate; sanitise here so an attacker-planted filename like
@@ -344,7 +397,7 @@ public final class AffectedTestsEngine {
                 buckets,
                 false,
                 false,
-                Situation.DISCOVERY_SUCCESS,
+                finalSituation,
                 Action.SELECTED,
                 EscalationReason.NONE
         );
@@ -411,6 +464,7 @@ public final class AffectedTestsEngine {
         return switch (situation) {
             case EMPTY_DIFF -> EscalationReason.RUN_ALL_ON_EMPTY_CHANGESET;
             case DISCOVERY_EMPTY -> EscalationReason.RUN_ALL_IF_NO_MATCHES;
+            case DISCOVERY_INCOMPLETE -> EscalationReason.RUN_ALL_ON_DISCOVERY_INCOMPLETE;
             case UNMAPPED_FILE -> EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE;
             case ALL_FILES_IGNORED -> EscalationReason.RUN_ALL_ON_ALL_FILES_IGNORED;
             case ALL_FILES_OUT_OF_SCOPE -> EscalationReason.RUN_ALL_ON_ALL_FILES_OUT_OF_SCOPE;
