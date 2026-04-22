@@ -10,6 +10,7 @@ import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -92,7 +93,7 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
 
             if (testReferencesChangedClass(cu, changedFqns, simpleNames, simpleNameToFqns)) {
                 discoveredTests.add(testFqn);
-                log.debug("Usage match: {}", testFqn);
+                log.debug("Usage match: {}", LogSanitizer.sanitize(testFqn));
             }
         }
 
@@ -150,15 +151,26 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         // `c.d.Outer` (PathToClassMapper is file-based, so it only
         // surfaces the outer FQN for the nested class's change). Without
         // this, a test that only uses the inner class is silently missed.
+        // All {@code changedFqn} and {@code imported} values in the
+        // Tier 1 / 1b / 2 / 3 blocks below are diff-derived and may
+        // legitimately carry odd but-valid characters that still need
+        // control-char sanitisation before they hit the logger — a
+        // malicious MR can craft an import line like
+        // {@code import com.evil.\u001b[m;}. Sanitisation is applied
+        // even at DEBUG because operators bumping level to chase a
+        // false-positive selection is exactly when forgery-resistance
+        // matters most.
         for (String changedFqn : changedFqns) {
             if (importedFqns.contains(changedFqn)) {
-                log.debug("  Direct import match: {}", changedFqn);
+                log.debug("  Direct import match: {}", LogSanitizer.sanitize(changedFqn));
                 return true;
             }
             String innerPrefix = changedFqn + ".";
             for (String imported : importedFqns) {
                 if (imported.startsWith(innerPrefix)) {
-                    log.debug("  Inner-class import match: {} <- {}", changedFqn, imported);
+                    log.debug("  Inner-class import match: {} <- {}",
+                            LogSanitizer.sanitize(changedFqn),
+                            LogSanitizer.sanitize(imported));
                     return true;
                 }
             }
@@ -185,14 +197,16 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         //     failed, silently dropping the consumer's coverage.
         for (String changedFqn : changedFqns) {
             if (wildcardPackages.contains(changedFqn)) {
-                log.debug("  Wildcard class-member import match: {}", changedFqn);
+                log.debug("  Wildcard class-member import match: {}",
+                        LogSanitizer.sanitize(changedFqn));
                 return true;
             }
             String pkg = SourceFileScanner.packageOf(changedFqn);
             if (wildcardPackages.contains(pkg)) {
                 String simpleName = SourceFileScanner.simpleClassName(changedFqn);
                 if (typeNameAppearsInAst(cu, simpleName)) {
-                    log.debug("  Wildcard package import + type ref match: {}", changedFqn);
+                    log.debug("  Wildcard package import + type ref match: {}",
+                            LogSanitizer.sanitize(changedFqn));
                     return true;
                 }
             }
@@ -207,7 +221,8 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             if (testPackage.equals(changedPkg)) {
                 String simpleName = SourceFileScanner.simpleClassName(changedFqn);
                 if (typeNameAppearsInAst(cu, simpleName)) {
-                    log.debug("  Same-package type ref match: {}", changedFqn);
+                    log.debug("  Same-package type ref match: {}",
+                            LogSanitizer.sanitize(changedFqn));
                     return true;
                 }
             }
@@ -231,7 +246,9 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
             if (scoped == null || !scoped.contains(".")) continue;
             for (String changedFqn : changedFqns) {
                 if (scoped.equals(changedFqn) || scoped.startsWith(changedFqn + ".")) {
-                    log.debug("  Inline fully-qualified reference: {} -> {}", scoped, changedFqn);
+                    log.debug("  Inline fully-qualified reference: {} -> {}",
+                            LogSanitizer.sanitize(scoped),
+                            LogSanitizer.sanitize(changedFqn));
                     return true;
                 }
             }

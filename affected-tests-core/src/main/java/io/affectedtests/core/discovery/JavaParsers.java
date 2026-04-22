@@ -5,6 +5,7 @@ import com.github.javaparser.ParseResult;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ParserConfiguration.LanguageLevel;
 import com.github.javaparser.ast.CompilationUnit;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -92,15 +93,32 @@ final class JavaParsers {
             String firstProblem = result.getProblems().isEmpty()
                     ? "no diagnostics"
                     : result.getProblems().get(0).getMessage();
+            // Both {@code file} (attacker-committable filename from
+            // the scanned source tree) and {@code firstProblem} (parser
+            // diagnostic that can embed a source-code snippet sourced
+            // from an attacker-controlled file) flow into a default-
+            // visible WARN line. Sanitise both so an attacker who
+            // plants a file with a {@code \n} + fake authoritative
+            // status line in the name or content cannot forge CI log
+            // output. Label is an internal constant, not sanitised.
             log.warn("Affected Tests: [{}] failed to parse {} at language level {}: {}",
-                    label, file, LANGUAGE_LEVEL, firstProblem);
+                    label,
+                    LogSanitizer.sanitize(String.valueOf(file)),
+                    LANGUAGE_LEVEL,
+                    LogSanitizer.sanitize(firstProblem));
             return null;
         } catch (Exception e) {
             // Preserve the pre-v1.9.20 behaviour of degrading the
             // exception path to DEBUG (I/O races, file-deleted-under-
             // JGit, etc. are noisy on CI) while still surfacing the
             // much-more-common isSuccessful==false branch above.
-            log.debug("Affected Tests: [{}] error parsing {}: {}", label, file, e.getMessage());
+            // Sanitise the same way as the WARN branch so that if an
+            // operator bumps the level to DEBUG to investigate, the
+            // log cannot be retroactively forged.
+            log.debug("Affected Tests: [{}] error parsing {}: {}",
+                    label,
+                    LogSanitizer.sanitize(String.valueOf(file)),
+                    LogSanitizer.sanitize(e.getMessage()));
             return null;
         }
     }
