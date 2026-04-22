@@ -133,6 +133,75 @@ class ImplementationStrategyTest {
     }
 
     @Test
+    void findsRecordImplementationOfChangedInterface() throws IOException {
+        // Regression: records can implement interfaces, and modern
+        // value-object code leans heavily on them
+        // (`record UsdMoney(long cents) implements Money`). The old
+        // strategy only iterated ClassOrInterfaceDeclaration so
+        // records were invisible to the AST supertype pass — and
+        // since naming-convention matches like "MoneyImpl" don't fit
+        // record idioms either (records typically get named for the
+        // value they hold, not for the interface), the record's test
+        // was silently dropped on every change to the interface it
+        // implements.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("Money.java"),
+                "package com.example;\npublic interface Money { long cents(); }");
+        Files.writeString(prodDir.resolve("UsdMoney.java"), """
+                package com.example;
+
+                public record UsdMoney(long cents) implements Money {}
+                """);
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("UsdMoneyTest.java"),
+                "package com.example;\npublic class UsdMoneyTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Money"), tempDir);
+
+        assertTrue(result.contains("com.example.UsdMoneyTest"),
+                "Record implementation's test must be discovered when the "
+                        + "interface it implements changes");
+    }
+
+    @Test
+    void findsEnumImplementationOfChangedInterface() throws IOException {
+        // Same failure mode as the record case: enums frequently
+        // implement behaviour-carrying interfaces
+        // (`enum Currency implements HasCode`), and the old strategy
+        // skipped them entirely. An interface-level change that tweaks
+        // the contract for every enum constant should re-run the
+        // enum's test; pre-fix it quietly did not.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("HasCode.java"),
+                "package com.example;\npublic interface HasCode { String code(); }");
+        Files.writeString(prodDir.resolve("Currency.java"), """
+                package com.example;
+
+                public enum Currency implements HasCode {
+                    USD { public String code() { return "USD"; } },
+                    EUR { public String code() { return "EUR"; } };
+                }
+                """);
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("CurrencyTest.java"),
+                "package com.example;\npublic class CurrencyTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.HasCode"), tempDir);
+
+        assertTrue(result.contains("com.example.CurrencyTest"),
+                "Enum implementation's test must be discovered when the "
+                        + "interface it implements changes");
+    }
+
+    @Test
     void findsGrandchildImplementationThroughMultiLevelHierarchy() throws IOException {
         // Hierarchy: interface A  <--  abstract class B implements A
         //                          <-- class C extends B

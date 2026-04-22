@@ -11,6 +11,7 @@ import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
@@ -132,7 +133,19 @@ public final class GitChangeDetector {
                     + "Ensure the ref exists (e.g. run 'git fetch origin' in CI).");
         }
 
-        AbstractTreeIterator baseTree = prepareTreeParser(repository, baseId);
+        // Diff against the merge-base of baseRef and HEAD, not the tip
+        // of baseRef. The difference matters any time master has moved
+        // forward since the branch diverged: a tip-of-base diff treats
+        // every post-divergence file added on master as "reverted" on
+        // the feature branch, inflating the diff with paths the MR
+        // never touched. In a large monorepo this routinely puts
+        // hundreds of unrelated files into the mapper and — because
+        // many of them are `.java` under the configured source dirs —
+        // silently drags dozens of unrelated test classes into every
+        // MR's dispatch. Merge-base matches how `git diff master...HEAD`
+        // (three-dot form, CI-standard) computes the MR scope.
+        ObjectId mergeBaseId = mergeBaseOrBase(repository, baseId, headId);
+        AbstractTreeIterator baseTree = prepareTreeParser(repository, mergeBaseId);
         AbstractTreeIterator headTree = prepareTreeParser(repository, headId);
 
         List<DiffEntry> diffs = git.diff()
@@ -142,6 +155,40 @@ public final class GitChangeDetector {
 
         collectPaths(diffs, files);
         return files;
+    }
+
+    /**
+     * Returns the merge-base of {@code baseId} and {@code headId}, or
+     * {@code baseId} as a safe fallback when no common ancestor exists
+     * (unrelated histories, root-commit branches). The fallback keeps
+     * behaviour identical to pre-v1.9.20 for the one genuinely
+     * pathological case where there is nothing to merge-base against.
+     */
+    private static ObjectId mergeBaseOrBase(Repository repository,
+                                            ObjectId baseId, ObjectId headId) throws IOException {
+        try (RevWalk walk = new RevWalk(repository)) {
+            RevCommit baseCommit = walk.parseCommit(baseId);
+            RevCommit headCommit = walk.parseCommit(headId);
+            walk.setRevFilter(RevFilter.MERGE_BASE);
+            walk.markStart(baseCommit);
+            walk.markStart(headCommit);
+            RevCommit mergeBase = walk.next();
+            if (mergeBase != null) {
+                log.debug("Resolved merge-base {} between baseRef and HEAD",
+                        mergeBase.getId().name());
+                return mergeBase.getId();
+            }
+            // WARN (not DEBUG) because this is a correctness-equivalent
+            // but semantically different code path: the diff shape is
+            // whatever `baseRef tip vs HEAD` produces, which on grafted
+            // or subtree-merged histories can dump the entire baseRef
+            // tree. Operators need to see the escalation, not hunt for
+            // it at DEBUG.
+            log.warn("Affected Tests: no merge-base between baseRef and HEAD — "
+                    + "falling back to baseRef tip (diff may be inflated; see "
+                    + "grafted/subtree-merge histories). This mirrors pre-v1.9.20 behaviour.");
+            return baseId;
+        }
     }
 
     private Set<String> uncommittedChanges(Git git) throws GitAPIException {

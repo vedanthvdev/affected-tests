@@ -1,9 +1,11 @@
 package io.affectedtests.core.discovery;
 
 import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.EnumDeclaration;
+import com.github.javaparser.ast.body.RecordDeclaration;
+import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import org.slf4j.Logger;
@@ -145,7 +147,7 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         // pass adds nothing new, or when depth hits the configured
         // transitiveDepth (reused as a sanity bound — in practice Java
         // hierarchies are 2-3 deep).
-        JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
+        JavaParser fallbackParser = (index == null) ? JavaParsers.newParser() : null;
 
         // Deep-copy the inner sets so the fixpoint loop's subsequent
         // `.add(implFqn)` calls don't leak mutations into
@@ -161,10 +163,29 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                 CompilationUnit cu = parseOrGet(sourceFile, index, fallbackParser);
                 if (cu == null) continue;
 
-                List<ClassOrInterfaceDeclaration> declarations =
-                        cu.findAll(ClassOrInterfaceDeclaration.class);
+                // Iterate every TypeDeclaration — not just
+                // ClassOrInterfaceDeclaration. Records (Java 16+) and
+                // enums (Java 5+) can both implement interfaces:
+                //
+                //   record UsdMoney(long cents) implements Money { ... }
+                //   enum Currency implements HasCode { USD, EUR, ... }
+                //
+                // The old loop only scanned classes/interfaces, so a
+                // service interface with a record-valued consumer
+                // (increasingly common in value-object-heavy codebases)
+                // saw its consumer silently dropped on interface
+                // changes — the one failure mode this strategy exists
+                // to prevent.
+                // JavaParser's findAll(Class<T>) typing forces a raw
+                // TypeDeclaration here because TypeDeclaration is
+                // generic in its self-type. The supertypesOf helper
+                // below re-narrows each declaration via pattern-
+                // matching instanceof, so the raw iteration is safe.
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                List<TypeDeclaration<?>> declarations =
+                        (List<TypeDeclaration<?>>) (List) cu.findAll(TypeDeclaration.class);
 
-                for (ClassOrInterfaceDeclaration decl : declarations) {
+                for (TypeDeclaration<?> decl : declarations) {
                     String implFqn = extractFqn(cu, decl);
                     if (implFqn == null || implementations.contains(implFqn)) {
                         // Already known — skip. `implementations.contains`
@@ -172,20 +193,12 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
                         // in the set it stops seeding further passes.
                         continue;
                     }
-                    for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
-                        if (targetsBySimpleName.containsKey(extended.getNameAsString())) {
+                    for (ClassOrInterfaceType supertype : supertypesOf(decl)) {
+                        if (targetsBySimpleName.containsKey(supertype.getNameAsString())) {
                             newImpls.add(implFqn);
-                            log.debug("[impl] depth {}: {} extends {}",
-                                    depth + 1, implFqn, extended.getNameAsString());
-                            break;
-                        }
-                    }
-                    if (newImpls.contains(implFqn)) continue;
-                    for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
-                        if (targetsBySimpleName.containsKey(implemented.getNameAsString())) {
-                            newImpls.add(implFqn);
-                            log.debug("[impl] depth {}: {} implements {}",
-                                    depth + 1, implFqn, implemented.getNameAsString());
+                            log.debug("[impl] depth {}: {} ({}) extends/implements {}",
+                                    depth + 1, implFqn, decl.getClass().getSimpleName(),
+                                    supertype.getNameAsString());
                             break;
                         }
                     }
@@ -216,15 +229,7 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         if (index != null) {
             return index.compilationUnit(file);
         }
-        try {
-            ParseResult<CompilationUnit> result = fallbackParser.parse(file);
-            if (result.isSuccessful() && result.getResult().isPresent()) {
-                return result.getResult().get();
-            }
-        } catch (Exception e) {
-            log.debug("Error parsing source file {}: {}", file, e.getMessage());
-        }
-        return null;
+        return JavaParsers.parseOrWarn(fallbackParser, file, "impl");
     }
 
     /**
@@ -240,11 +245,54 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
         return fqns;
     }
 
-    private String extractFqn(CompilationUnit cu, ClassOrInterfaceDeclaration decl) {
+    private String extractFqn(CompilationUnit cu, TypeDeclaration<?> decl) {
         String pkg = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .orElse("");
         String name = decl.getNameAsString();
         return pkg.isEmpty() ? name : pkg + "." + name;
+    }
+
+    /**
+     * Returns the combined extends + implements list for any
+     * {@link TypeDeclaration} shape we care about.
+     *
+     * <p>Records and annotations cannot {@code extends} another named
+     * type (records implicitly extend {@code java.lang.Record},
+     * annotations implicitly extend {@code java.lang.annotation.Annotation}),
+     * and {@link EnumDeclaration} enumerates its constants rather than a
+     * superclass. For those shapes only {@code implements} contributes
+     * supertype edges.
+     */
+    private static List<ClassOrInterfaceType> supertypesOf(TypeDeclaration<?> decl) {
+        List<ClassOrInterfaceType> result = new ArrayList<>();
+        if (decl instanceof ClassOrInterfaceDeclaration c) {
+            result.addAll(c.getExtendedTypes());
+            result.addAll(c.getImplementedTypes());
+        } else if (decl instanceof RecordDeclaration r) {
+            result.addAll(r.getImplementedTypes());
+        } else if (decl instanceof EnumDeclaration e) {
+            result.addAll(e.getImplementedTypes());
+        } else if (decl instanceof com.github.javaparser.ast.body.AnnotationDeclaration) {
+            // Annotations can't widen their implicit supertype
+            // (java.lang.annotation.Annotation). Empty list is the
+            // correct answer — not a drop.
+            return result;
+        } else {
+            // Defensive: when a future JavaParser release introduces a
+            // new TypeDeclaration subtype we want the new construct to
+            // be *loud* rather than silently dropping every consumer
+            // test that depended on it (the exact failure mode records
+            // caused before batch 4 fixed them). WARN surfaces at the
+            // default log level so operators can open a ticket; the
+            // strategy keeps running and treats the type as having no
+            // known supertypes, which is the correct conservative
+            // fallback (cannot become a false impl match; at worst we
+            // underselect for a single declaration).
+            log.warn("Affected Tests: [impl] unknown TypeDeclaration subtype {} for {} — "
+                            + "supertype edges cannot be derived, skipping",
+                    decl.getClass().getSimpleName(), decl.getNameAsString());
+        }
+        return result;
     }
 }

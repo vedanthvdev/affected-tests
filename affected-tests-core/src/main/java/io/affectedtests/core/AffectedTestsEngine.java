@@ -223,6 +223,31 @@ public final class AffectedTestsEngine {
             return resolveAmbiguous(Situation.ALL_FILES_OUT_OF_SCOPE, changedFiles,
                     mapping.productionClasses(), mapping.testClasses(), buckets);
         }
+        // Mixed "nothing actionable" case: every file is either ignored
+        // or out-of-scope, but no single bucket owns the whole diff. The
+        // two pure-bucket checks above already short-circuited if any
+        // unmapped / production / test file existed, so reaching here
+        // with both ignored > 0 AND outOfScope > 0 means the diff
+        // contains exactly those two categories and nothing else.
+        //
+        // Pre-fix, this slid through to discovery with empty
+        // {@code productionClasses} and {@code testClasses}, every
+        // strategy returned empty, and the engine escalated via
+        // {@link Situation#DISCOVERY_EMPTY} — which under the default
+        // {@code runAllIfNoMatches=true} routed to {@code FULL_SUITE}.
+        // The result: a pure "docs + api-test" MR ran the whole unit
+        // suite despite the user having told the plugin "these dirs
+        // don't influence tests". Routing to {@link Situation#ALL_FILES_OUT_OF_SCOPE}
+        // instead lets {@code onAllFilesOutOfScope} (the stronger
+        // operator signal when both signals disagree) decide, which
+        // defaults to {@link Action#SKIPPED} in every built-in mode.
+        if (ignored + outOfScope == diffSize) {
+            log.info("All {} changed file(s) split between ignored ({}) and out-of-scope ({}); "
+                            + "routing to ALL_FILES_OUT_OF_SCOPE.",
+                    diffSize, ignored, outOfScope);
+            return resolveAmbiguous(Situation.ALL_FILES_OUT_OF_SCOPE, changedFiles,
+                    mapping.productionClasses(), mapping.testClasses(), buckets);
+        }
         if (!mapping.unmappedChangedFiles().isEmpty()) {
             Action action = config.actionFor(Situation.UNMAPPED_FILE);
             // Filenames flow from the untrusted MR tree straight into the

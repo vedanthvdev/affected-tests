@@ -295,6 +295,67 @@ class GitChangeDetectorTest {
     }
 
     @Test
+    void diffsAgainstMergeBaseNotBaseRefTip() throws Exception {
+        // Regression: the old path diffed HEAD directly against the
+        // tip of baseRef. If master moved on after the branch
+        // diverged, every file that landed on master post-divergence
+        // showed up as a "change" on the feature branch — even though
+        // the feature branch never touched those files. Modulr
+        // typically ships 20-100 merges/day on master, so a week-old
+        // feature branch would see the whole backlog of unrelated
+        // production changes dumped into its diff, inflating the
+        // affected-tests set to essentially "everything" and
+        // destroying the whole point of selective testing. The fix
+        // computes the merge-base between baseRef and HEAD first, so
+        // the diff only reflects what the feature branch actually
+        // changed relative to where it diverged.
+        try (Git git = initRepoWithInitialCommit()) {
+            // --- Shared history: create foo on master ---
+            Path foo = tempDir.resolve("src/main/java/com/example/Foo.java");
+            Files.createDirectories(foo.getParent());
+            Files.writeString(foo, "package com.example;\npublic class Foo {}");
+            git.add().addFilepattern(".").call();
+            String divergencePoint = git.commit().setMessage("add Foo").call().getName();
+
+            // --- Branch off and commit a feature change ---
+            git.branchCreate().setName("feature").call();
+            git.checkout().setName("feature").call();
+            Path bar = tempDir.resolve("src/main/java/com/example/Bar.java");
+            Files.writeString(bar, "package com.example;\npublic class Bar {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("feature: add Bar").call();
+
+            // --- Master advances with an unrelated change ---
+            // The feature branch must NOT see this in its diff.
+            git.checkout().setName("master").call();
+            Path unrelated = tempDir.resolve("src/main/java/com/example/Unrelated.java");
+            Files.writeString(unrelated, "package com.example;\npublic class Unrelated {}");
+            git.add().addFilepattern(".").call();
+            git.commit().setMessage("master: unrelated change").call();
+
+            // --- Detect changes from feature branch against master ---
+            git.checkout().setName("feature").call();
+            AffectedTestsConfig config = AffectedTestsConfig.builder()
+                    .baseRef("master")
+                    .includeUncommitted(false)
+                    .includeStaged(false)
+                    .build();
+
+            GitChangeDetector detector = new GitChangeDetector(tempDir, config);
+            Set<String> changed = detector.detectChangedFiles();
+
+            assertTrue(changed.contains("src/main/java/com/example/Bar.java"),
+                    "Feature branch's own change must surface, got: " + changed);
+            assertFalse(changed.contains("src/main/java/com/example/Unrelated.java"),
+                    "Unrelated master-only change must NOT appear in the "
+                            + "feature branch's diff — merge-base is the boundary, "
+                            + "got: " + changed);
+            assertFalse(divergencePoint.isEmpty(),
+                    "sanity: divergence point must exist");
+        }
+    }
+
+    @Test
     void failsLoudlyOnNonGitDirectory() {
         Path nonGitDir = tempDir.resolve("not-a-repo");
         nonGitDir.toFile().mkdirs();
