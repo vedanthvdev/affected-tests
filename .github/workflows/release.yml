@@ -3,6 +3,18 @@ name: Release
 on:
   push:
     branches: [master]
+  # Manual trigger for non-patch releases. Supplying `version: 1.10.0` forces
+  # axion-release to cut that exact tag instead of the default patch
+  # auto-increment. Leave `version` empty to emulate the auto-trigger (which is
+  # useful for re-running a failed publish against HEAD without landing a new
+  # commit).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit release version (e.g. 1.10.0). Leave empty for default patch auto-increment.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   release:
@@ -17,10 +29,13 @@ jobs:
       # Route github.* context values through env vars rather than inlining
       # them into shell scripts. This prevents expression injection when those
       # values contain shell metacharacters (e.g. a branch ref with `;`, `$`
-      # or backticks).
+      # or backticks). The version input is treated the same way for
+      # consistency — even though GitHub validates workflow_dispatch inputs,
+      # routing it through env keeps one style across the whole workflow.
       GH_ACTOR: ${{ github.actor }}
       GH_TOKEN: ${{ github.token }}
       GH_REF_NAME: ${{ github.ref_name }}
+      RELEASE_VERSION_INPUT: ${{ inputs.version }}
 
     steps:
       - uses: actions/checkout@v6
@@ -47,9 +62,26 @@ jobs:
       # tagged successfully but failed during publish, re-running this workflow
       # will skip tagging and proceed straight to the "publish if missing" step
       # below — that's what makes the pipeline idempotent.
-      - name: Release (auto-increment patch, tag, push)
+      #
+      # Version override: on workflow_dispatch with a non-empty `version`
+      # input, pass `-Prelease.version=<VERSION>` so axion-release tags that
+      # exact version instead of auto-incrementing the patch. On push events,
+      # `RELEASE_VERSION_INPUT` is empty and the call stays identical to the
+      # pre-override form.
+      - name: Release (tag and push)
         if: steps.tag_check.outputs.already_tagged == 'false'
-        run: ./gradlew release -Prelease.pushTagsOnly "-Prelease.customUsername=$GH_ACTOR" "-Prelease.customPassword=$GH_TOKEN"
+        run: |
+          VERSION_ARG=()
+          if [[ -n "$RELEASE_VERSION_INPUT" ]]; then
+            echo "Explicit release version requested: $RELEASE_VERSION_INPUT"
+            VERSION_ARG=("-Prelease.version=$RELEASE_VERSION_INPUT")
+          else
+            echo "No explicit version — axion-release will auto-increment patch."
+          fi
+          ./gradlew release -Prelease.pushTagsOnly \
+            "${VERSION_ARG[@]}" \
+            "-Prelease.customUsername=$GH_ACTOR" \
+            "-Prelease.customPassword=$GH_TOKEN"
 
       - name: Resolve released version
         id: released
