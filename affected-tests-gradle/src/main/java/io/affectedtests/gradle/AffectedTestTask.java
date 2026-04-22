@@ -322,6 +322,16 @@ public abstract class AffectedTestTask extends DefaultTask {
 
         AffectedTestsConfig config = buildConfig();
 
+        // Surface each deprecation warning exactly once before the
+        // engine runs so the message sits adjacent to the config it
+        // describes. Using {@code warn} (not {@code lifecycle}) keeps
+        // the warning visible in CI log excerpts that filter below
+        // lifecycle, and lets build-scan deprecation dashboards pick
+        // it up as a first-class warning rather than an info line.
+        for (String warning : config.deprecationWarnings()) {
+            getLogger().warn(warning);
+        }
+
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
 

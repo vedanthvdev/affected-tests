@@ -169,10 +169,6 @@ affectedTests {
     // Production source sets the plugin must treat as out-of-scope.
     outOfScopeSourceDirs = []
 
-    // Back-compat alias for ignorePaths. Still honoured so existing
-    // configs keep working. (default: [])
-    // excludePaths = ["**/generated/**"]
-
     // ---------------- Per-situation actions (v2) ----------------
 
     // Each takes one of "selected" | "full_suite" | "skipped".
@@ -182,16 +178,6 @@ affectedTests {
     onAllFilesOutOfScope   = "skipped"
     onUnmappedFile         = "full_suite"  // the key MR-safety knob
     onDiscoveryEmpty       = "full_suite"  // belt-and-braces for CI
-
-    // ---------------- Legacy booleans (still supported) ----------------
-
-    // Translated into onEmptyDiff + onDiscoveryEmpty at build() time.
-    // (default: false)
-    runAllIfNoMatches = false
-
-    // Translated into onUnmappedFile at build() time.
-    // (default: true — "run more, never run less")
-    runAllOnNonJavaChange = true
 
     // ---------------- Discovery tuning ----------------
 
@@ -276,24 +262,112 @@ Every row below shows the situation the engine resolved, and the action applied 
 | Only mapped production/test `.java` files | `DISCOVERY_SUCCESS` (or `DISCOVERY_EMPTY` if no tests map) | `SELECTED` | discovery tuning |
 | Only files matching `ignorePaths` (docs, LICENSE, CHANGELOG, images, generated) | `ALL_FILES_IGNORED` | `SKIPPED` | `onAllFilesIgnored` or `mode=strict` |
 | Only files under `outOfScopeTestDirs` / `outOfScopeSourceDirs` (e.g. api-test only) | `ALL_FILES_OUT_OF_SCOPE` | `SKIPPED` | `onAllFilesOutOfScope` |
-| Any YAML / Gradle / Liquibase / `.java` outside configured dirs | `UNMAPPED_FILE` | `FULL_SUITE` (via `runAllOnNonJavaChange=true`) | `onUnmappedFile = "selected"` / `runAllOnNonJavaChange = false` |
-| No changed files at all | `EMPTY_DIFF` | `SKIPPED` | `onEmptyDiff = "full_suite"` / `runAllIfNoMatches = true` / `mode = strict` |
-| Mapping succeeds but discovery returns zero tests | `DISCOVERY_EMPTY` | `SKIPPED` — or `FULL_SUITE` if `mode=ci`/`strict` or `runAllIfNoMatches=true` | `onDiscoveryEmpty` / `mode` / `runAllIfNoMatches` |
+| Any YAML / Gradle / Liquibase / `.java` outside configured dirs | `UNMAPPED_FILE` | `FULL_SUITE` (via `onUnmappedFile = "full_suite"`) | `onUnmappedFile = "selected"` |
+| No changed files at all | `EMPTY_DIFF` | `SKIPPED` | `onEmptyDiff = "full_suite"` / `mode = strict` |
+| Mapping succeeds but discovery returns zero tests | `DISCOVERY_EMPTY` | `SKIPPED` — or `FULL_SUITE` if `mode=ci`/`strict` | `onDiscoveryEmpty` / `mode` |
 | Mixed diff: Java + unmapped file | `UNMAPPED_FILE` (takes precedence) | `FULL_SUITE` | `onUnmappedFile` — set to `"selected"` to fall through to discovery |
 | `baseRef` not resolvable | `FAILED` | Hard error (prevents silent test skipping in CI) | — |
 | Not a git work tree / JGit I/O error | `FAILED` | Hard error | — |
 
 The `onUnmappedFile = "full_suite"` default follows the "run more, never run less" principle: a change to `application.yml` can alter production behaviour just as surely as a change to a `.java` file, so the plugin cannot safely pick a subset from an empty Java mapping.
 
-### Migration from pre-v2
+### Migrating from v1 config
 
-Existing configs keep working. Specifically:
+Existing configs keep working — **no pipeline breaks today**. But the legacy knobs are deprecated and will be removed in **v2.0.0**. If any of these appear in your `build.gradle`, the plugin will print a `WARNING` on every `affectedTest` run naming the replacement:
 
-- `runAllIfNoMatches = true` is translated into `onEmptyDiff = FULL_SUITE` **and** `onDiscoveryEmpty = FULL_SUITE` (the pre-v2 behaviour conflated them).
-- `runAllOnNonJavaChange = true` is translated into `onUnmappedFile = FULL_SUITE`.
-- `excludePaths` continues to work as an alias for `ignorePaths`.
+- `runAllIfNoMatches`
+- `runAllOnNonJavaChange`
+- `excludePaths`
 
-The escalation log line names **both** the v2 decision and the legacy flag that would have produced it, so existing grep-based CI dashboards don't break.
+#### Deprecation timeline
+
+| Release | What happens |
+|---|---|
+| **v1.9.x and earlier** | Legacy knobs work silently. No warnings. |
+| **v1.10.x** (this release) | Legacy knobs still work. A per-run `WARNING: [affected-tests] '<knob>' is deprecated…` names each one and its replacement. Zero-config users see nothing. |
+| **v2.0.0** (next major) | Legacy knobs removed. `excludePaths`, `runAllIfNoMatches`, `runAllOnNonJavaChange` become unknown properties — Gradle will fail configuration. |
+
+#### Before / after
+
+| v1 config | v2 equivalent | Why |
+|---|---|---|
+| `runAllIfNoMatches = true` | `onEmptyDiff = "full_suite"` **and** `onDiscoveryEmpty = "full_suite"` | The v1 flag conflated two different situations ("git diff is empty" vs "discovery found nothing"). v2 splits them so you can e.g. skip empty-diff runs but still fall back to full suite when discovery fails. |
+| `runAllIfNoMatches = false` (explicit) | Leave `onEmptyDiff` / `onDiscoveryEmpty` unset (defaults to `SKIPPED`) or set `mode = "local"` | Same effect, zero config. |
+| `runAllOnNonJavaChange = true` | `onUnmappedFile = "full_suite"` | Single-situation knob, same semantics. |
+| `runAllOnNonJavaChange = false` | `onUnmappedFile = "selected"` | Plugin treats the unmapped file as if absent and continues to discovery. |
+| `excludePaths = ["**/generated/**"]` | `ignorePaths = ["**/generated/**"]` | Identical semantics — just a rename. |
+| `excludePaths = []` (explicit empty) | **Delete the line** | v2's default `ignorePaths` list is broader (markdown, licence, changelog, images, generated). Explicitly empty discards all of it. |
+
+#### Worked example
+
+**Before (v1):**
+
+```groovy
+affectedTests {
+    baseRef = "origin/master"
+    runAllIfNoMatches = true
+    runAllOnNonJavaChange = true
+    excludePaths = ["**/generated/**"]
+    transitiveDepth = 4
+}
+```
+
+**After (v2):**
+
+```groovy
+affectedTests {
+    baseRef = "origin/master"
+    mode = "ci"                                // one line replaces both booleans in 95% of cases
+    // excludePaths / ignorePaths unset — v2 default already covers generated/
+    // transitiveDepth = 4 now the default, no need to set it
+}
+```
+
+Or if you want every situation explicit (recommended for production pipelines where you care about each edge case):
+
+```groovy
+affectedTests {
+    baseRef = "origin/master"
+    onEmptyDiff          = "full_suite"
+    onAllFilesIgnored    = "skipped"
+    onAllFilesOutOfScope = "skipped"
+    onUnmappedFile       = "full_suite"
+    onDiscoveryEmpty     = "full_suite"
+}
+```
+
+#### Decision tree — "which replacement do I need?"
+
+```
+Did you set runAllIfNoMatches?
+├─ No                    → nothing to do for this knob
+├─ runAllIfNoMatches = true
+│  └─ set onEmptyDiff = "full_suite" AND onDiscoveryEmpty = "full_suite"
+│     (or just set mode = "ci" / mode = "strict" — both imply it)
+└─ runAllIfNoMatches = false
+   └─ just delete the line (v2 default is SKIPPED)
+
+Did you set runAllOnNonJavaChange?
+├─ No                           → nothing to do
+├─ runAllOnNonJavaChange = true → set onUnmappedFile = "full_suite"
+│                                  (or just delete the line — it's the default)
+└─ runAllOnNonJavaChange = false → set onUnmappedFile = "selected"
+
+Did you set excludePaths?
+├─ No                → nothing to do
+├─ excludePaths = [] → delete the line (you probably want the broader v2 default)
+└─ excludePaths = [...] → rename to ignorePaths with the same list
+```
+
+#### What the summary log tells you during migration
+
+Every `affectedTest` run prints the outcome + situation + legacy flag (if applicable) on one line, so existing grep-based CI dashboards keep matching during and after the migration:
+
+```
+Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
+```
+
+Both vocabularies appear — the v2 name (`onUnmappedFile=FULL_SUITE`) and the legacy name (`runAllOnNonJavaChange=true`) — so you can migrate without breaking any existing alert rules.
 
 ## Project Structure
 

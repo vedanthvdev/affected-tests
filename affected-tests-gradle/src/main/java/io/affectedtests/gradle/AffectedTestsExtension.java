@@ -11,15 +11,22 @@ import org.gradle.api.provider.Property;
  * affectedTests {
  *     baseRef = "origin/master"
  *     includeUncommitted = true
- *     runAllIfNoMatches = false
+ *     // v2: per-situation actions (replaces runAllIfNoMatches / runAllOnNonJavaChange).
+ *     // See README.md "Migrating from v1 config" for the full table.
+ *     mode = "ci"
+ *     onEmptyDiff          = "full_suite"
+ *     onAllFilesOutOfScope = "skipped"
+ *     onUnmappedFile       = "full_suite"
+ *     onDiscoveryEmpty     = "full_suite"
+ *     ignorePaths = ["&#42;&#42;/generated/&#42;&#42;"]
+ *     outOfScopeTestDirs = ["api-test/src/test/java"]
  *     strategies = ["naming", "usage", "impl", "transitive"]
- *     transitiveDepth = 2
+ *     transitiveDepth = 4
  *     testSuffixes = ["Test", "IT", "ITTest", "IntegrationTest"]
  *     sourceDirs = ["src/main/java"]
  *     testDirs = ["src/test/java"]
- *     excludePaths = ["&#42;&#42;/generated/&#42;&#42;"]
  *     includeImplementationTests = true
- *     implementationNaming = ["Impl"]
+ *     implementationNaming = ["Impl", "Default"]
  * }
  * }</pre>
  */

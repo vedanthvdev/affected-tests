@@ -269,4 +269,119 @@ class AffectedTestsConfigTest {
         assertThrows(UnsupportedOperationException.class, () ->
                 config.excludePaths().add("foo"));
     }
+
+    // -----------------------------------------------------------------
+    // Phase 2 — deprecation warnings for legacy v1 knobs.
+    //
+    // The warnings exist to nudge callers onto the v2 config without
+    // breaking their build. The core guarantee is: *only* explicit uses
+    // of a legacy setter trigger a warning, and every warning names the
+    // replacement knob so operators can fix their build.gradle without
+    // reading the docs first.
+    // -----------------------------------------------------------------
+
+    @Test
+    void deprecationWarningsAreEmptyForZeroConfigBuild() {
+        // Zero-config install must not emit warnings even though the
+        // effective config still resolves via the legacy-boolean shim:
+        // the warning tracks *caller intent* (did they type the old
+        // name), not the resolution path the engine walked.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        assertTrue(config.deprecationWarnings().isEmpty(),
+                "Zero-config installs must not spam a deprecation warning — "
+                        + "the legacy boolean shim is implementation detail, "
+                        + "the caller never typed runAllIfNoMatches anywhere");
+    }
+
+    @Test
+    void deprecationWarningFiresWhenLegacyRunAllIfNoMatchesIsSet() {
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .runAllIfNoMatches(false)
+                .build();
+        String warning = singleWarning(config,
+                "runAllIfNoMatches must produce exactly one warning");
+        assertTrue(warning.contains("runAllIfNoMatches"),
+                "Warning must name the deprecated knob so a build.gradle 'grep' can "
+                        + "find it: " + warning);
+        assertTrue(warning.contains("onEmptyDiff")
+                        && warning.contains("onDiscoveryEmpty"),
+                "Warning must name the v2 replacements so the operator can migrate "
+                        + "from the log alone, without opening the docs: " + warning);
+    }
+
+    @Test
+    void deprecationWarningFiresWhenLegacyRunAllOnNonJavaChangeIsSet() {
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .runAllOnNonJavaChange(true)
+                .build();
+        String warning = singleWarning(config,
+                "runAllOnNonJavaChange must produce exactly one warning");
+        assertTrue(warning.contains("runAllOnNonJavaChange"),
+                "Warning must name the deprecated knob: " + warning);
+        assertTrue(warning.contains("onUnmappedFile"),
+                "Warning must name the v2 replacement (onUnmappedFile): " + warning);
+    }
+
+    @Test
+    void deprecationWarningFiresWhenLegacyExcludePathsIsSet() {
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .excludePaths(List.of("**/generated/**"))
+                .build();
+        String warning = singleWarning(config,
+                "excludePaths must produce exactly one warning");
+        assertTrue(warning.contains("excludePaths"));
+        assertTrue(warning.contains("ignorePaths"),
+                "Warning must name the rename target (ignorePaths): " + warning);
+    }
+
+    @Test
+    void deprecationWarningsListThreeEntriesWhenAllLegacyKnobsAreSet() {
+        // All three legacy knobs at once — the log must name each one
+        // individually so a caller with a chain of legacy config lines
+        // sees a full audit, not just the first deprecation.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .runAllIfNoMatches(true)
+                .runAllOnNonJavaChange(true)
+                .excludePaths(List.of("**/generated/**"))
+                .build();
+        assertEquals(3, config.deprecationWarnings().size(),
+                "Three legacy knobs set => three distinct warnings");
+        // Stable order keeps CI log greps deterministic across runs.
+        assertTrue(config.deprecationWarnings().get(0).contains("runAllIfNoMatches"));
+        assertTrue(config.deprecationWarnings().get(1).contains("runAllOnNonJavaChange"));
+        assertTrue(config.deprecationWarnings().get(2).contains("excludePaths"));
+    }
+
+    @Test
+    void deprecationWarningsAreUnmodifiable() {
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .runAllIfNoMatches(true)
+                .build();
+        assertThrows(UnsupportedOperationException.class,
+                () -> config.deprecationWarnings().add("mutated"),
+                "List must be unmodifiable so the Gradle task cannot accidentally "
+                        + "leak mutations to a shared config instance");
+    }
+
+    @Test
+    void deprecationWarningsDoNotFireForV2KnobsEvenWhenSet() {
+        // v2-native config: mode, onXxx, ignorePaths, outOfScope*.
+        // None of these should trigger a deprecation warning.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .mode(Mode.CI)
+                .onUnmappedFile(Action.FULL_SUITE)
+                .onDiscoveryEmpty(Action.FULL_SUITE)
+                .onAllFilesIgnored(Action.SKIPPED)
+                .ignorePaths(List.of("**/generated/**", "*.md"))
+                .outOfScopeTestDirs(List.of("api-test/src/test/java"))
+                .build();
+        assertTrue(config.deprecationWarnings().isEmpty(),
+                "v2-native config must never emit a deprecation — "
+                        + "otherwise migrators have nothing to aim for");
+    }
+
+    private static String singleWarning(AffectedTestsConfig config, String message) {
+        assertEquals(1, config.deprecationWarnings().size(), message);
+        return config.deprecationWarnings().get(0);
+    }
 }

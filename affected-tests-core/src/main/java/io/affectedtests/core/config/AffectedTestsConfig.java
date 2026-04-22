@@ -1,5 +1,6 @@
 package io.affectedtests.core.config;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +65,7 @@ public final class AffectedTestsConfig {
     private final Mode effectiveMode;
     private final Map<Situation, Action> situationActions;
     private final Map<Situation, ActionSource> situationActionSources;
+    private final List<String> deprecationWarnings;
 
     private AffectedTestsConfig(Builder builder) {
         this.baseRef = builder.baseRef;
@@ -114,6 +116,48 @@ public final class AffectedTestsConfig {
         ResolvedActions resolved = resolveSituationActions(builder, this.effectiveMode);
         this.situationActions = resolved.actions;
         this.situationActionSources = resolved.sources;
+
+        this.deprecationWarnings = buildDeprecationWarnings(builder);
+    }
+
+    /**
+     * Collects the list of human-readable deprecation warnings that the
+     * Gradle layer should surface for this build. One entry per legacy
+     * knob the caller explicitly touched — we detect "caller touched it"
+     * via the nullable backing field on the builder, so that zero-config
+     * users never see a warning even though their effective config still
+     * resolves through the legacy shim.
+     *
+     * <p>The returned list is in stable order (runAllIfNoMatches,
+     * runAllOnNonJavaChange, excludePaths) so log output is grep-stable
+     * across runs. Each message names the legacy knob, when it will be
+     * removed, and the v2 replacement — operators should be able to fix
+     * their config from the message alone without opening the docs.
+     */
+    private static List<String> buildDeprecationWarnings(Builder builder) {
+        List<String> warnings = new ArrayList<>(3);
+        if (builder.runAllIfNoMatches != null) {
+            warnings.add("[affected-tests] 'runAllIfNoMatches' is deprecated and will be "
+                    + "removed in v2.0.0. Replace it with per-situation actions "
+                    + "(onEmptyDiff / onAllFilesIgnored / onAllFilesOutOfScope / onDiscoveryEmpty), "
+                    + "each set to 'full_suite' to match runAllIfNoMatches=true, or 'skipped' "
+                    + "to match runAllIfNoMatches=false. See README.md section "
+                    + "'Migrating from v1 config'.");
+        }
+        if (builder.runAllOnNonJavaChange != null) {
+            warnings.add("[affected-tests] 'runAllOnNonJavaChange' is deprecated and will be "
+                    + "removed in v2.0.0. Replace it with 'onUnmappedFile' "
+                    + "(full_suite / selected / skipped). See README.md section "
+                    + "'Migrating from v1 config'.");
+        }
+        if (builder.excludePaths != null) {
+            warnings.add("[affected-tests] 'excludePaths' is deprecated and will be removed "
+                    + "in v2.0.0. Rename it to 'ignorePaths' — identical semantics, and "
+                    + "leaving it unset picks up the broader v2 default list "
+                    + "(markdown, generated/, licence/changelog, images). See README.md "
+                    + "section 'Migrating from v1 config'.");
+        }
+        return List.copyOf(warnings);
     }
 
     /** Parallel pair returned from the situation-action resolver. */
@@ -371,6 +415,18 @@ public final class AffectedTestsConfig {
      * @return an immutable situation-to-source map
      */
     public Map<Situation, ActionSource> situationActionSources() { return situationActionSources; }
+
+    /**
+     * Human-readable deprecation warnings the caller should surface to
+     * its users (for the Gradle plugin: via {@code Logger.warn}). Empty
+     * when the caller only uses v2 knobs. One entry per legacy setter
+     * that was explicitly invoked — callers that rely on the pre-v2
+     * defaults (zero config) get zero warnings.
+     *
+     * @return an unmodifiable list of warning strings; empty when the
+     *         config was built without touching any legacy setter
+     */
+    public List<String> deprecationWarnings() { return deprecationWarnings; }
 
     /** Creates a builder with sensible defaults. */
     public static Builder builder() {
