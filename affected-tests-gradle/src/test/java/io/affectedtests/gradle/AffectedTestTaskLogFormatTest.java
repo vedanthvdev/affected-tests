@@ -8,6 +8,7 @@ import io.affectedtests.core.config.Situation;
 import org.junit.jupiter.api.Test;
 import org.slf4j.helpers.MessageFormatter;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -49,12 +50,106 @@ class AffectedTestTaskLogFormatTest {
         String summary = render(AffectedTestTask.renderSummary(result));
 
         assertEquals(
-                "Affected Tests: 1 changed file(s), 1 production class(es), 2 test class(es) affected",
+                "Affected Tests: SELECTED (DISCOVERY_SUCCESS) — 1 changed file(s), "
+                        + "1 production class(es), 2 test class(es) affected",
                 summary,
-                "Non-runAll summary must spell out the exact selection the downstream test "
-                        + "task will receive, so operators can cross-check against the module-routed "
-                        + "logs below — and the pluralisation form must match the runAll branch to "
-                        + "keep CI greps stable");
+                "SELECTED summary must name the outcome and the situation up front so the "
+                        + "operator can tell at a glance what the engine decided, then spell out "
+                        + "the exact selection the downstream test task will receive");
+    }
+
+    @Test
+    void summaryPrefixNamesOutcomeAndSituationOnEveryBranch() {
+        // The Phase 1 close-out contract: every summary line must start
+        // with "OUTCOME (SITUATION) —" so CI greps and human readers can
+        // bucket runs by outcome without having to parse the tail.
+        AffectedTestsResult selected = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"), Set.of(),
+                Buckets.empty(),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+        AffectedTestsResult runAll = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/resources/application.yml"),
+                Set.of(), Set.of(),
+                Buckets.empty(),
+                true, false,
+                Situation.UNMAPPED_FILE, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+        AffectedTestsResult skipped = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("README.md"), Set.of(), Set.of(),
+                Buckets.empty(),
+                false, true,
+                Situation.ALL_FILES_IGNORED, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        assertTrue(render(AffectedTestTask.renderSummary(selected))
+                        .startsWith("Affected Tests: SELECTED (DISCOVERY_SUCCESS) —"),
+                "SELECTED prefix must name both action and situation — previously the summary "
+                        + "carried neither, so any operator seeing 'Affected Tests: 1 changed file(s)…' "
+                        + "had no idea whether discovery had actually landed or the engine was about "
+                        + "to full-suite");
+        assertTrue(render(AffectedTestTask.renderSummary(runAll))
+                        .startsWith("Affected Tests: FULL_SUITE (UNMAPPED_FILE) —"),
+                "FULL_SUITE prefix must name the situation so 'UNMAPPED_FILE vs DISCOVERY_EMPTY vs "
+                        + "EMPTY_DIFF' is visible without cross-referencing the escalation reason");
+        assertTrue(render(AffectedTestTask.renderSummary(skipped))
+                        .startsWith("Affected Tests: SKIPPED (ALL_FILES_IGNORED) —"),
+                "SKIPPED branch must also carry the prefix — previously skipped runs printed a "
+                        + "separate 'Skipping test execution (...)' line without the outcome vocabulary");
+    }
+
+    @Test
+    void skippedBranchNamesReasonPhraseForEachSituation() {
+        // The SKIPPED branch is new — previously the task emitted a
+        // separate side-line. Every non-DISCOVERY_SUCCESS situation
+        // must produce a distinct reason phrase so operators can tell
+        // "README-only MR" from "api-test-only MR" from "discovery
+        // found nothing" at a glance.
+        java.util.Map<Situation, String> expected = java.util.Map.of(
+                Situation.EMPTY_DIFF,             "no changed files detected",
+                Situation.ALL_FILES_IGNORED,      "every changed file matched ignorePaths",
+                Situation.ALL_FILES_OUT_OF_SCOPE, "every changed file sat under out-of-scope dirs",
+                Situation.UNMAPPED_FILE,          "non-Java or unmapped file in diff",
+                Situation.DISCOVERY_EMPTY,        "no affected tests discovered");
+
+        expected.forEach((situation, phrase) -> {
+            AffectedTestsResult skipped = new AffectedTestsResult(
+                    Set.of(), Map.of(),
+                    Set.of(), Set.of(), Set.of(),
+                    Buckets.empty(),
+                    false, true,
+                    situation, Action.SKIPPED,
+                    EscalationReason.NONE);
+            String summary = render(AffectedTestTask.renderSummary(skipped));
+            assertTrue(summary.contains(phrase),
+                    "SKIPPED summary for " + situation + " must contain phrase '" + phrase
+                            + "' — operators rely on that substring to distinguish this skip "
+                            + "from every other skip reason");
+            assertTrue(summary.contains("SKIPPED (" + situation + ")"),
+                    "SKIPPED summary must name the situation in the prefix");
+        });
+    }
+
+    @Test
+    void describeSkipReasonRejectsDiscoverySuccess() {
+        // DISCOVERY_SUCCESS + SKIPPED is an engine bug — if discovery
+        // returned tests we never skip. The helper must fail loudly so
+        // such a drift cannot surface a placeholder phrase in CI.
+        assertThrows(IllegalStateException.class,
+                () -> AffectedTestTask.describeSkipReason(Situation.DISCOVERY_SUCCESS),
+                "describeSkipReason(DISCOVERY_SUCCESS) must throw — that combination is an "
+                        + "engine contract violation, not a log-formatting concern");
+    }
+
+    @Test
+    void describeSkipReasonRejectsNull() {
+        assertThrows(NullPointerException.class,
+                () -> AffectedTestTask.describeSkipReason(null));
     }
 
     @Test
@@ -171,7 +266,7 @@ class AffectedTestTaskLogFormatTest {
     }
 
     @Test
-    void formatPlaceholderCountMatchesArgsLengthOnBothBranches() {
+    void formatPlaceholderCountMatchesArgsLengthOnEveryBranch() {
         // Regression guard for the SLF4J-placeholder contract: every `{}`
         // pair in the format string is consumed by exactly one positional
         // arg, and every arg must have a placeholder to render into.
@@ -197,14 +292,20 @@ class AffectedTestTaskLogFormatTest {
                 false, false,
                 Situation.DISCOVERY_SUCCESS, Action.SELECTED,
                 EscalationReason.NONE);
+        AffectedTestsResult skipped = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("README.md"), Set.of(), Set.of(),
+                Buckets.empty(),
+                false, true,
+                Situation.ALL_FILES_IGNORED, Action.SKIPPED,
+                EscalationReason.NONE);
 
-        AffectedTestTask.LogLine escalatedLine = AffectedTestTask.renderSummary(escalated);
-        AffectedTestTask.LogLine normalLine = AffectedTestTask.renderSummary(normal);
-
-        assertEquals(countPlaceholders(escalatedLine.format()), escalatedLine.args().length,
-                "runAll branch must have one {} per arg so SLF4J's formatter consumes all args");
-        assertEquals(countPlaceholders(normalLine.format()), normalLine.args().length,
-                "non-runAll branch must have one {} per arg so SLF4J's formatter consumes all args");
+        for (AffectedTestsResult r : List.of(escalated, normal, skipped)) {
+            AffectedTestTask.LogLine line = AffectedTestTask.renderSummary(r);
+            assertEquals(countPlaceholders(line.format()), line.args().length,
+                    "Summary branch for " + r.action() + "/" + r.situation()
+                            + " must have one {} per arg so SLF4J's formatter consumes all args");
+        }
     }
 
     private static int countPlaceholders(String format) {

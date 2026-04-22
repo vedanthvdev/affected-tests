@@ -338,29 +338,33 @@ public abstract class AffectedTestTask extends DefaultTask {
             return;
         }
 
-        // The summary line is the single place the task names the trigger;
-        // downstream lines must not repeat the reason or CI logs drift into
-        // contradictory duplicate phrasing. We hand the logger a format
-        // string + args pair instead of a pre-formatted string so any future
-        // phrase containing `{` or `}` characters (Liquibase file names,
+        // The summary line is the single place the task names the
+        // outcome (SELECTED / FULL_SUITE / SKIPPED), the situation that
+        // produced it, and the reason phrase. Downstream lines must not
+        // repeat any of those fields or CI logs drift into contradictory
+        // duplicate phrasing. We hand the logger a format string + args
+        // pair instead of a pre-formatted string so any future phrase
+        // containing `{` or `}` characters (Liquibase file names,
         // JSONpath expressions) renders literally rather than silently
         // disappearing into the placeholder parser.
         LogLine summary = renderSummary(result);
         getLogger().lifecycle(summary.format(), summary.args());
 
+        // Skipped results return here without touching the executor.
+        // Intentionally no follow-up line — the summary already carried
+        // the {@code SKIPPED (SITUATION)} prefix and the reason phrase,
+        // so a separate "Skipping test execution (…)" log would only
+        // duplicate what the operator already read.
         if (result.skipped()) {
-            // Skipped is its own first-class outcome in v2: the engine
-            // deliberately chose to run no tests (e.g. api-test-only diff
-            // with onAllFilesOutOfScope=SKIPPED). Logging it distinctly
-            // from "selection empty" keeps the user's --explain expectation
-            // honest — "skipped (situation)" vs "no affected tests".
-            getLogger().lifecycle("Skipping test execution ({}: {}).",
-                    result.situation(), result.action());
             return;
         }
 
         if (result.testClassFqns().isEmpty() && !result.runAll()) {
-            getLogger().lifecycle("No affected tests to run. Skipping test execution.");
+            // Defensive fallthrough: the engine should have already
+            // routed this into {@code SKIPPED} via
+            // {@link AffectedTestsEngine.Situation#DISCOVERY_EMPTY},
+            // but we keep the guard so a future regression surfaces as
+            // a log line instead of a silent no-op.
             return;
         }
 
@@ -649,17 +653,6 @@ public abstract class AffectedTestTask extends DefaultTask {
         };
     }
 
-    /**
-     * Builds the single summary line printed to Gradle's lifecycle log for
-     * every {@code affectedTest} run. The runAll branch names the real
-     * trigger (so "0 production classes, 0 test classes affected" never
-     * sits next to "running full suite"), and non-runAll runs emit the
-     * selection counts the downstream test dispatch will honour.
-     *
-     * <p>Pluralisation is deliberately fixed to {@code file(s)},
-     * {@code class(es)}, and {@code class(es)} on both branches so CI
-     * greps stay stable across runs with different selection sizes.
-     */
     /** Cap on files listed per bucket in the {@code --explain} trace. */
     static final int EXPLAIN_SAMPLE_LIMIT = 10;
 
@@ -778,21 +771,90 @@ public abstract class AffectedTestTask extends DefaultTask {
         };
     }
 
+    /**
+     * Builds the single summary line printed to Gradle's lifecycle log
+     * for every {@code affectedTest} run. Every branch names the
+     * outcome ({@link Action#SELECTED}, {@link Action#FULL_SUITE},
+     * {@link Action#SKIPPED}) and the {@link Situation} that produced
+     * it, followed by the file count and branch-specific details.
+     *
+     * <p>Shape:
+     * <pre>
+     * Affected Tests: SELECTED (DISCOVERY_SUCCESS) — N changed file(s), P production class(es), T test class(es) affected
+     * Affected Tests: FULL_SUITE (UNMAPPED_FILE) — N changed file(s); running full suite (reason)
+     * Affected Tests: SKIPPED (ALL_FILES_IGNORED) — N changed file(s); every changed file matched ignorePaths
+     * </pre>
+     *
+     * <p>Pluralisation is deliberately fixed to {@code file(s)} and
+     * {@code class(es)} across every branch so CI greps stay stable
+     * across runs with different selection sizes. Every phrase that
+     * pre-v2 or Phase-1 CI pipelines grep for ({@code "running full
+     * suite"}, {@code "runAllIfNoMatches=true"}, {@code "no affected
+     * tests discovered"}, etc.) survives verbatim — this change adds
+     * the outcome/situation prefix without removing any existing
+     * vocabulary.
+     */
     static LogLine renderSummary(AffectedTestsResult result) {
+        String prefix = "Affected Tests: " + result.action().name()
+                + " (" + result.situation().name() + ") — ";
         if (result.runAll()) {
+            // runAll branch keeps the pre-v2 "running full suite (reason)"
+            // wording verbatim so existing CI greps for that substring
+            // continue to match every FULL_SUITE run. Reason phrase is
+            // sourced from describeEscalation to avoid duplicating the
+            // legacy vocabulary across two files.
             return new LogLine(
-                    "Affected Tests: {} changed file(s); running full suite ({}).",
+                    prefix + "{} changed file(s); running full suite ({}).",
                     new Object[] {
                             result.changedFiles().size(),
                             describeEscalation(result.escalationReason())
                     });
         }
+        if (result.skipped()) {
+            return new LogLine(
+                    prefix + "{} changed file(s); {}.",
+                    new Object[] {
+                            result.changedFiles().size(),
+                            describeSkipReason(result.situation())
+                    });
+        }
         return new LogLine(
-                "Affected Tests: {} changed file(s), {} production class(es), {} test class(es) affected",
+                prefix + "{} changed file(s), {} production class(es), {} test class(es) affected",
                 new Object[] {
                         result.changedFiles().size(),
                         result.changedProductionClasses().size(),
                         result.testClassFqns().size()
                 });
+    }
+
+    /**
+     * Renders a {@link Situation} as a short human-readable phrase
+     * suitable for the summary line's {@code SKIPPED} branch. Only the
+     * five "ambiguous" situations can legitimately resolve to
+     * {@link Action#SKIPPED}; {@link Situation#DISCOVERY_SUCCESS} is
+     * rejected because the engine never skips when it found tests.
+     *
+     * <p>Package-private so {@code AffectedTestTaskLogFormatTest} can
+     * pin the exact wording — mirrors {@link #describeEscalation} so
+     * the two halves of the summary log share one vocabulary.
+     */
+    static String describeSkipReason(Situation situation) {
+        Objects.requireNonNull(situation, "situation");
+        return switch (situation) {
+            case EMPTY_DIFF ->
+                    "no changed files detected";
+            case ALL_FILES_IGNORED ->
+                    "every changed file matched ignorePaths";
+            case ALL_FILES_OUT_OF_SCOPE ->
+                    "every changed file sat under out-of-scope dirs";
+            case UNMAPPED_FILE ->
+                    "onUnmappedFile=SKIPPED — non-Java or unmapped file in diff";
+            case DISCOVERY_EMPTY ->
+                    "no affected tests discovered";
+            case DISCOVERY_SUCCESS -> throw new IllegalStateException(
+                    "describeSkipReason must not be called for DISCOVERY_SUCCESS; "
+                            + "the engine only produces that situation on a non-empty "
+                            + "selection, which is never skipped");
+        };
     }
 }

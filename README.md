@@ -88,6 +88,18 @@ That's it. With zero config, the plugin will:
 
 Every invocation resolves to exactly one **Situation** and exactly one **Action**, both of which appear in the log line so an operator can tell — at a glance — why the plugin chose what it did.
 
+### Summary log format
+
+Every `affectedTest` run prints exactly one summary line in the form `Affected Tests: <OUTCOME> (<SITUATION>) — <details>`:
+
+```
+Affected Tests: SELECTED (DISCOVERY_SUCCESS) — 3 changed file(s), 2 production class(es), 5 test class(es) affected
+Affected Tests: FULL_SUITE (UNMAPPED_FILE) — 1 changed file(s); running full suite (runAllOnNonJavaChange=true / onUnmappedFile=FULL_SUITE — non-Java or unmapped file in diff).
+Affected Tests: SKIPPED (ALL_FILES_IGNORED) — 1 changed file(s); every changed file matched ignorePaths.
+```
+
+The outcome (`SELECTED` / `FULL_SUITE` / `SKIPPED`) and the situation that produced it are first-class fields on every branch, so CI dashboards can `grep -E '^Affected Tests: (SELECTED|FULL_SUITE|SKIPPED)'` and bucket runs without parsing the tail. Every pre-v2 phrase (`running full suite`, `runAllIfNoMatches=true`, `runAllOnNonJavaChange=true`, `no affected tests discovered`) still appears verbatim in the reason segment, so existing greps keep working.
+
 ### Situations (what the engine saw)
 
 | Situation | Fires when |
