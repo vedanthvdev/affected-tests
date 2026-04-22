@@ -303,4 +303,89 @@ class UsageStrategyTest {
                 "Should find test at depth 3");
         assertEquals(2, result.size());
     }
+
+    @Test
+    void findsTestThatImportsInnerClassOfChangedOuter() throws IOException {
+        // Regression: PathToClassMapper is file-based and only surfaces the
+        // outer FQN when `Outer.java` (containing nested `Outer.Inner`) is
+        // changed. A test that only references the inner class writes
+        // `import com.example.Outer.Inner;` — pre-fix the direct-import
+        // tier matched `importedFqns.contains("com.example.Outer")` which
+        // is false (the imported name is `com.example.Outer.Inner`). The
+        // test was silently dropped.
+        Path testDir = tempDir.resolve("src/test/java/com/example/inner");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("InnerUserTest.java"), """
+                package com.example.inner;
+
+                import com.example.Outer.Inner;
+
+                public class InnerUserTest {
+                    public void t() { Inner i = new Inner(); }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Outer"), tempDir);
+
+        assertTrue(result.contains("com.example.inner.InnerUserTest"),
+                "Test importing Outer.Inner must be selected when Outer changes — "
+                        + "inner-class changes surface via the outer's file");
+    }
+
+    @Test
+    void findsTestThatUsesStaticImportFromChangedClass() throws IOException {
+        // Regression: a test that only consumes a changed class through
+        // `import static com.example.Constants.MAX_VALUE;` never matched
+        // any tier — the imported name is `com.example.Constants.MAX_VALUE`,
+        // not the class FQN, and the class itself is often never written
+        // as a type in the test body. Consequence: changes to a pure
+        // constants-holder class silently dropped the tests that consume
+        // its constants.
+        Path testDir = tempDir.resolve("src/test/java/com/example/cfg");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("ConstantsUserTest.java"), """
+                package com.example.cfg;
+
+                import static com.example.Constants.MAX_VALUE;
+
+                public class ConstantsUserTest {
+                    public void t() { int x = MAX_VALUE; }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Constants"), tempDir);
+
+        assertTrue(result.contains("com.example.cfg.ConstantsUserTest"),
+                "Static-import-only consumer must be selected when the "
+                        + "backing class changes");
+    }
+
+    @Test
+    void findsTestThatUsesStaticWildcardImportFromChangedClass() throws IOException {
+        // Same as above but with the wildcard static form:
+        // `import static com.example.Constants.*;`. Pre-fix this was
+        // bucketed into wildcardPackages with the value "com.example.Constants"
+        // — wrong, because that's a class name and would only match tests
+        // in a (non-existent) package named "com.example.Constants".
+        Path testDir = tempDir.resolve("src/test/java/com/example/cfg");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("ConstantsWildcardUserTest.java"), """
+                package com.example.cfg;
+
+                import static com.example.Constants.*;
+
+                public class ConstantsWildcardUserTest {
+                    public void t() { int x = MAX_VALUE; }
+                }
+                """);
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.Constants"), tempDir);
+
+        assertTrue(result.contains("com.example.cfg.ConstantsWildcardUserTest"),
+                "Static wildcard import must be treated as a reference to the "
+                        + "class, not as a package-level wildcard");
+    }
 }

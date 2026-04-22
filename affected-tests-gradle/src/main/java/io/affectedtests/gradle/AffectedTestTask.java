@@ -9,6 +9,7 @@ import io.affectedtests.core.config.ActionSource;
 import io.affectedtests.core.config.AffectedTestsConfig;
 import io.affectedtests.core.config.Mode;
 import io.affectedtests.core.config.Situation;
+import io.affectedtests.core.util.LogSanitizer;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
 import org.gradle.api.file.DirectoryProperty;
@@ -526,10 +527,15 @@ public abstract class AffectedTestTask extends DefaultTask {
                         // tree sneaking shell-like tokens into a --tests
                         // argument. The FQN cannot correspond to a real
                         // JVM test class, so dropping it is lossless.
+                        // Sanitise before logging — this is the exact
+                        // input shape an attacker-planted filename
+                        // containing a newline or ANSI escape would land
+                        // in, and WARN is rendered in CI by default.
                         getLogger().warn(
                                 "Affected Tests: skipping malformed test FQN '{}' for task {} — "
                                         + "not a Java-shaped identifier, cannot correspond to a "
-                                        + "real test class.", fqn, taskPath);
+                                        + "real test class.",
+                                LogSanitizer.sanitize(fqn), taskPath);
                         continue;
                     }
                     valid.add(fqn);
@@ -678,14 +684,20 @@ public abstract class AffectedTestTask extends DefaultTask {
     }
 
     /**
-     * Java-shaped identifier regex with {@code $} allowed inside names
-     * for inner classes ({@code com.example.Outer$Inner}) and a
-     * {@code .methodName} tail for Gradle's
-     * {@code --tests com.example.Foo.someMethod} syntax. Matches a
-     * strict superset of what a sane Java source file can declare.
-     * Anything outside this shape cannot correspond to a real test
-     * class and is dropped with a warning before reaching the nested
-     * Gradle invocation.
+     * Matches a dotted sequence of Java identifier segments — the shape
+     * Gradle's {@code --tests} accepts. Each segment starts with a
+     * letter, {@code _}, or {@code $} and continues with letters,
+     * digits, {@code _}, or {@code $}. The trailing segment doubles as
+     * either an inner-class name (in the {@code Outer.Inner} form
+     * JavaParser emits) or a method name (in the
+     * {@code com.example.Foo.someMethod} form Gradle's
+     * {@code --tests} matcher expects); the regex does not — and
+     * intentionally cannot — distinguish between those two cases, since
+     * both are legal argv for the nested Gradle invocation. The
+     * bytecode-style {@code Outer$Inner} shape is also accepted because
+     * {@code $} is a valid identifier character in Java; discovery does
+     * not produce that shape today but users occasionally type it by
+     * hand on the command line.
      *
      * <p>Deliberately does NOT reject Java reserved words
      * ({@code if}, {@code class}, {@code return}, ...). The contract
@@ -856,10 +868,11 @@ public abstract class AffectedTestTask extends DefaultTask {
         lines.add("=== Affected Tests — decision trace (--explain) ===");
         lines.add("Base ref:        " + config.baseRef());
         String configuredMode = config.mode() == null ? "unset" : config.mode().name();
-        String effectiveMode = config.effectiveMode() == null
-                ? "n/a (pre-v2 defaults)"
-                : config.effectiveMode().name();
-        lines.add("Mode:            " + configuredMode + " (effective: " + effectiveMode + ")");
+        // effectiveMode() is always non-null (see its Javadoc) — zero-config
+        // callers get the AUTO-detected value, identical to what an explicit
+        // `mode = "auto"` would have resolved to.
+        lines.add("Mode:            " + configuredMode
+                + " (effective: " + config.effectiveMode().name() + ")");
         lines.add("Changed files:   " + result.changedFiles().size());
 
         Buckets buckets = result.buckets();
@@ -987,9 +1000,13 @@ public abstract class AffectedTestTask extends DefaultTask {
         if (files.isEmpty()) {
             return;
         }
+        // Filenames originate from the git diff of an (on the merge-gate,
+        // attacker-controllable) MR tree. Sanitise before they reach the
+        // logger — see LogSanitizer for the full log-forgery rationale.
         String preview = files.stream()
                 .sorted()
                 .limit(EXPLAIN_SAMPLE_LIMIT)
+                .map(LogSanitizer::sanitize)
                 .collect(Collectors.joining(", "));
         if (files.size() > EXPLAIN_SAMPLE_LIMIT) {
             preview = preview + ", … (+" + (files.size() - EXPLAIN_SAMPLE_LIMIT) + " more)";

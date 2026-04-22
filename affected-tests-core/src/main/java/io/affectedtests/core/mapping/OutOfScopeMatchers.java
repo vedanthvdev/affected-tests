@@ -107,9 +107,39 @@ public final class OutOfScopeMatchers {
                     }
                 });
             } else {
-                String prefix = normalizedDir.endsWith("/") ? normalizedDir : normalizedDir + "/";
+                // The `bare` form is the directory without any trailing slash;
+                // `prefix` is the same thing with a trailing slash appended.
+                //
+                // The matcher accepts four shapes, all of which represent the
+                // same logical "path is under this directory" relationship:
+                //
+                //   path == bare            — caller handed us the directory
+                //                             itself (ProjectIndex does this
+                //                             after Path.relativize, which
+                //                             never emits a trailing slash).
+                //                             Pre-fix this case silently
+                //                             leaked: an entry exactly
+                //                             equal to a resolved source
+                //                             dir was not filtered.
+                //   path.startsWith(prefix) — path is a descendant file or
+                //                             subdirectory.
+                //   path ends with bare     — path *is* the directory, but
+                //                             nested under a parent (covers
+                //                             the relativized-from-project-
+                //                             root case where the entry is
+                //                             a sub-path like
+                //                             "sub/src/main/java").
+                //   path.contains("/"+prefix) — legacy shape preserved for
+                //                               parity with v1 behaviour.
+                String bare = normalizedDir.endsWith("/")
+                        ? normalizedDir.substring(0, normalizedDir.length() - 1)
+                        : normalizedDir;
+                String prefix = bare + "/";
                 matchers.add(path ->
-                        path.startsWith(prefix) || path.contains("/" + prefix));
+                        path.equals(bare)
+                                || path.startsWith(prefix)
+                                || path.endsWith("/" + bare)
+                                || path.contains("/" + prefix));
             }
         }
         return List.copyOf(matchers);

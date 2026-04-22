@@ -132,35 +132,80 @@ public final class ImplementationStrategy implements TestDiscoveryStrategy {
             }
         }
 
-        // 2. AST scanning: find classes that extend/implement changed types
+        // 2. AST scanning: find classes that extend/implement changed types,
+        // iterated to a fixpoint so multi-level hierarchies are covered.
+        //
+        // Motivating case: `interface A` ← `abstract class B implements A`
+        // ← `class C extends B`, with `CTest` the only real test
+        // coverage of A's behaviour through the C implementation. When A
+        // changes, a single pass finds only B (because nothing declares
+        // `extends A` directly except B). Pre-fix, CTest was silently
+        // dropped. The fixpoint loop treats each newly-found impl as a
+        // fresh target for the next pass; the loop terminates when a
+        // pass adds nothing new, or when depth hits the configured
+        // transitiveDepth (reused as a sanity bound — in practice Java
+        // hierarchies are 2-3 deep).
         JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
 
-        for (Path sourceFile : sourceFiles) {
-            CompilationUnit cu = parseOrGet(sourceFile, index, fallbackParser);
-            if (cu == null) continue;
+        // Deep-copy the inner sets so the fixpoint loop's subsequent
+        // `.add(implFqn)` calls don't leak mutations into
+        // simpleNameToFqns. The latter is unused after this point
+        // today, but a shared mutable reference is a footgun waiting
+        // for the next refactor.
+        Map<String, Set<String>> targetsBySimpleName = new HashMap<>();
+        simpleNameToFqns.forEach((k, v) -> targetsBySimpleName.put(k, new HashSet<>(v)));
+        int depthCap = Math.max(1, config.transitiveDepth());
+        for (int depth = 0; depth < depthCap; depth++) {
+            Set<String> newImpls = new LinkedHashSet<>();
+            for (Path sourceFile : sourceFiles) {
+                CompilationUnit cu = parseOrGet(sourceFile, index, fallbackParser);
+                if (cu == null) continue;
 
-            List<ClassOrInterfaceDeclaration> declarations =
-                    cu.findAll(ClassOrInterfaceDeclaration.class);
+                List<ClassOrInterfaceDeclaration> declarations =
+                        cu.findAll(ClassOrInterfaceDeclaration.class);
 
-            for (ClassOrInterfaceDeclaration decl : declarations) {
-                for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
-                    if (simpleNameToFqns.containsKey(extended.getNameAsString())) {
-                        String implFqn = extractFqn(cu, decl);
-                        if (implFqn != null) {
-                            implementations.add(implFqn);
-                            log.debug("[impl] {} extends {}", implFqn, extended.getNameAsString());
+                for (ClassOrInterfaceDeclaration decl : declarations) {
+                    String implFqn = extractFqn(cu, decl);
+                    if (implFqn == null || implementations.contains(implFqn)) {
+                        // Already known — skip. `implementations.contains`
+                        // is the loop's termination gate: once a class is
+                        // in the set it stops seeding further passes.
+                        continue;
+                    }
+                    for (ClassOrInterfaceType extended : decl.getExtendedTypes()) {
+                        if (targetsBySimpleName.containsKey(extended.getNameAsString())) {
+                            newImpls.add(implFqn);
+                            log.debug("[impl] depth {}: {} extends {}",
+                                    depth + 1, implFqn, extended.getNameAsString());
+                            break;
+                        }
+                    }
+                    if (newImpls.contains(implFqn)) continue;
+                    for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
+                        if (targetsBySimpleName.containsKey(implemented.getNameAsString())) {
+                            newImpls.add(implFqn);
+                            log.debug("[impl] depth {}: {} implements {}",
+                                    depth + 1, implFqn, implemented.getNameAsString());
+                            break;
                         }
                     }
                 }
-                for (ClassOrInterfaceType implemented : decl.getImplementedTypes()) {
-                    if (simpleNameToFqns.containsKey(implemented.getNameAsString())) {
-                        String implFqn = extractFqn(cu, decl);
-                        if (implFqn != null) {
-                            implementations.add(implFqn);
-                            log.debug("[impl] {} implements {}", implFqn, implemented.getNameAsString());
-                        }
-                    }
-                }
+            }
+
+            if (newImpls.isEmpty()) {
+                break;
+            }
+            implementations.addAll(newImpls);
+            // Seed the next pass with the newly-found impls keyed by
+            // simple name — subclasses of these impls will match on the
+            // next iteration. Previously-targeted names stay in the map
+            // so a single type can be discovered via two independent
+            // paths without losing an edge.
+            for (String implFqn : newImpls) {
+                targetsBySimpleName
+                        .computeIfAbsent(SourceFileScanner.simpleClassName(implFqn),
+                                k -> new HashSet<>())
+                        .add(implFqn);
             }
         }
 

@@ -7,6 +7,7 @@ import io.affectedtests.core.discovery.*;
 import io.affectedtests.core.git.GitChangeDetector;
 import io.affectedtests.core.mapping.PathToClassMapper;
 import io.affectedtests.core.mapping.PathToClassMapper.MappingResult;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -224,9 +225,16 @@ public final class AffectedTestsEngine {
         }
         if (!mapping.unmappedChangedFiles().isEmpty()) {
             Action action = config.actionFor(Situation.UNMAPPED_FILE);
+            // Filenames flow from the untrusted MR tree straight into the
+            // logger here — sanitise or an attacker committing a file
+            // with `\n` + fake plugin status line can forge CI audit
+            // output. See LogSanitizer for the full rationale.
+            List<String> examples = mapping.unmappedChangedFiles().stream()
+                    .limit(5)
+                    .map(LogSanitizer::sanitize)
+                    .toList();
             log.warn("Non-Java / unmapped change detected ({} file(s)). Action: {}. Examples: {}",
-                    mapping.unmappedChangedFiles().size(), action,
-                    mapping.unmappedChangedFiles().stream().limit(5).toList());
+                    mapping.unmappedChangedFiles().size(), action, examples);
             // SELECTED here means "ignore the unmapped file, proceed with
             // discovery on whatever production/test files were in the
             // diff" — this is the behaviour legacy
@@ -290,7 +298,12 @@ public final class AffectedTestsEngine {
         }
 
         log.info("=== Result: {} affected test classes ===", allTestsToRun.size());
-        allTestsToRun.forEach(t -> log.info("  -> {}", t));
+        // FQNs are derived from diff filenames by the discovery strategies
+        // and have not yet been through the AffectedTestTask#isValidFqn
+        // gate; sanitise here so an attacker-planted filename like
+        // `Test\nAffected Tests: SELECTED.java` can't forge a fake
+        // log line at INFO/--info level.
+        allTestsToRun.forEach(t -> log.info("  -> {}", LogSanitizer.sanitize(t)));
 
         return new AffectedTestsResult(
                 allTestsToRun,

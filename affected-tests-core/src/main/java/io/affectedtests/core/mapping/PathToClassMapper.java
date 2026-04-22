@@ -1,6 +1,7 @@
 package io.affectedtests.core.mapping;
 
 import io.affectedtests.core.config.AffectedTestsConfig;
+import io.affectedtests.core.util.LogSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -113,6 +114,28 @@ public final class PathToClassMapper {
         Set<String> unmappedChangedFiles = new LinkedHashSet<>();
 
         for (String filePath : changedFiles) {
+            // Reject path-traversal shapes up-front. Git never emits `..`
+            // segments in diff paths, so any such segment is either a
+            // malformed input or an attempt to confuse the mapper
+            // (e.g. `../../etc/passwd.java` would otherwise be handed to
+            // tryMapToClass which would happily produce an FQN starting
+            // with `..`). Treating them as unmapped — instead of a hard
+            // throw — keeps the tool resilient and lets the
+            // UNMAPPED_FILE safety net escalate to a full run, matching
+            // the general "we don't know what this is" contract.
+            if (hasTraversalSegment(filePath)) {
+                // Debug level (not warn) so a hostile MR can't blast
+                // the build output with N lines per traversal path —
+                // the engine's downstream `unmappedChangedFiles()`
+                // warning already surfaces the escalation once per
+                // diff at WARN level, which is the operator-facing
+                // signal that matters.
+                log.debug("Rejecting path with '..' segment as unmapped: {}",
+                        LogSanitizer.sanitize(filePath));
+                unmappedChangedFiles.add(filePath);
+                continue;
+            }
+
             // Ignore rules are evaluated FIRST: a user's explicit
             // {@code ignorePaths} entry is a contract that nothing about
             // the file should influence the engine, including nudging it
@@ -215,39 +238,17 @@ public final class PathToClassMapper {
         return null;
     }
 
-    /**
-     * Extracts the module prefix from a file path (e.g., "api" from "api/src/main/java/...").
-     * Uses boundary-aware matching to avoid false positives when a source directory name
-     * appears as a substring of a module name (e.g., "someapi/src/main/java" won't match "api/src/main/java").
-     *
-     * @param filePath the relative file path from git diff
-     * @return the module prefix, or empty string if no module prefix
-     */
-    public String extractModule(String filePath) {
+    private static boolean hasTraversalSegment(String filePath) {
+        if (filePath == null || filePath.isEmpty()) {
+            return false;
+        }
         String normalized = filePath.replace('\\', '/');
-        String module = extractModuleFromDirs(normalized, config.sourceDirs());
-        if (!module.isEmpty()) {
-            return module;
-        }
-        return extractModuleFromDirs(normalized, config.testDirs());
-    }
-
-    private String extractModuleFromDirs(String normalizedPath, java.util.List<String> dirs) {
-        for (String dir : dirs) {
-            String normalizedDir = dir.replace('\\', '/');
-            // Ensure the source dir is preceded by a "/" boundary or is at the start
-            String withSlash = "/" + normalizedDir;
-            int idx = normalizedPath.indexOf(withSlash);
-            if (idx > 0) {
-                // Module is everything before the "/" that precedes the source dir
-                return normalizedPath.substring(0, idx);
-            }
-            // Also check if the path starts directly with the source dir (no module prefix)
-            if (normalizedPath.startsWith(normalizedDir)) {
-                return "";
-            }
-        }
-        return "";
+        // Match `..` as a standalone path segment only — `foo..bar/baz`
+        // (a legitimate, if ugly, filename) must not trip this guard.
+        return normalized.equals("..")
+                || normalized.startsWith("../")
+                || normalized.endsWith("/..")
+                || normalized.contains("/../");
     }
 
     private boolean isIgnored(String filePath) {

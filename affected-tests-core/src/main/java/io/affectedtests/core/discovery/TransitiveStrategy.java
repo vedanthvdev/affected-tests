@@ -73,7 +73,17 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
         Set<String> currentLevel = new LinkedHashSet<>(changedProductionClasses);
         Set<String> allVisited = new LinkedHashSet<>(changedProductionClasses);
 
-        Map<String, Set<String>> dependencyMap = buildReverseDependencyMap(sourceFiles, index);
+        // The changed set is threaded into map construction so reverse edges
+        // pointing at a class that was just `git rm`'d still get recorded.
+        // Without this, a pure-delete MR (file on disk is gone, consumers
+        // still reference the FQN from their still-present sources) produces
+        // an empty `dependencyMap.get(deletedFqn)`, and the downstream tests
+        // that are now broken against the deleted symbol are silently skipped.
+        // GitChangeDetector already surfaces the old path for DELETEs to seed
+        // `changedProductionClasses`; this patch closes the other half of the
+        // contract on the index side.
+        Map<String, Set<String>> dependencyMap =
+                buildReverseDependencyMap(sourceFiles, index, changedProductionClasses);
 
         for (int depth = 1; depth <= config.transitiveDepth(); depth++) {
             Set<String> nextLevel = new LinkedHashSet<>();
@@ -115,17 +125,25 @@ public final class TransitiveStrategy implements TestDiscoveryStrategy {
      * Builds a <em>reverse</em> dependency map: for each production class FQN,
      * lists the FQNs of other production classes that depend on it.
      */
-    private Map<String, Set<String>> buildReverseDependencyMap(List<Path> sourceFiles, ProjectIndex index) {
+    private Map<String, Set<String>> buildReverseDependencyMap(List<Path> sourceFiles,
+                                                               ProjectIndex index,
+                                                               Set<String> extraKnownFqns) {
         Map<String, Set<String>> reverseMap = new HashMap<>();
         JavaParser fallbackParser = (index == null) ? new JavaParser() : null;
 
-        // First pass: collect all known FQNs so we can resolve simple names
+        // First pass: collect all known FQNs so we can resolve simple names.
+        // `extraKnownFqns` is unioned in so reverse edges to deleted classes
+        // (which no longer have a source file on disk) still resolve — see
+        // the caller's comment for the full rationale.
         Set<String> allKnownFqns = new HashSet<>();
         for (Path file : sourceFiles) {
             String fqn = pathToFqn(file);
             if (fqn != null) {
                 allKnownFqns.add(fqn);
             }
+        }
+        if (extraKnownFqns != null) {
+            allKnownFqns.addAll(extraKnownFqns);
         }
 
         // Second pass: for each source file, find field types and build reverse edges

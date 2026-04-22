@@ -107,4 +107,29 @@ class OutOfScopeMatchersTest {
         assertTrue(OutOfScopeMatchers.compile(List.of(), "outOfScopeTestDirs").isEmpty());
         assertTrue(OutOfScopeMatchers.compile(null, "outOfScopeTestDirs").isEmpty());
     }
+
+    @Test
+    void literalEntryMatchesExactDirectoryPath() {
+        // Regression for the silent-leak case reported by the correctness
+        // review: a literal entry whose value equals the resolved directory's
+        // relative path — exactly the shape that ProjectIndex hands the
+        // matcher after Path.relativize (which never emits a trailing
+        // slash) — was not filtered. Result: tests under that directory
+        // slipped into sourceFqns and got discovered by strategies that
+        // iterate the full source set (ImplementationStrategy), quietly
+        // violating the out-of-scope contract.
+        List<Predicate<String>> matchers = OutOfScopeMatchers.compile(
+                List.of("sub/src/main/java"), "outOfScopeSourceDirs");
+
+        assertTrue(OutOfScopeMatchers.matchesAny("sub/src/main/java", matchers),
+                "Literal entry must match the bare directory path — that is the "
+                        + "exact shape ProjectIndex relativizes to");
+        assertTrue(OutOfScopeMatchers.matchesAny("sub/src/main/java/Foo.java", matchers),
+                "Descendants must still match");
+        assertTrue(OutOfScopeMatchers.matchesAny("monorepo/sub/src/main/java", matchers),
+                "Nested parent path ending in the entry must still match");
+        assertFalse(OutOfScopeMatchers.matchesAny("sub/src/main/javax/Foo.java", matchers),
+                "Boundary semantics must still reject substring-only matches — "
+                        + "a dir named 'javax' is not under 'java'");
+    }
 }

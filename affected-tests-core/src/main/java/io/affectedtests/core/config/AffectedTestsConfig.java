@@ -365,12 +365,29 @@ public final class AffectedTestsConfig {
     public Mode mode() { return mode; }
 
     /**
-     * The mode after {@link Mode#AUTO} resolution. Always one of
-     * {@link Mode#LOCAL}, {@link Mode#CI} or {@link Mode#STRICT}.
+     * The mode after {@link Mode#AUTO} resolution. Always returns one of
+     * {@link Mode#LOCAL}, {@link Mode#CI} or {@link Mode#STRICT} — never
+     * {@code null}.
      *
-     * @return the resolved mode
+     * <p>When the caller did not configure a mode at all, the internal
+     * situation-action resolver deliberately falls through to pre-v2
+     * hardcoded defaults (preserving zero-config behaviour parity with
+     * the legacy API). The public getter still reports the mode that
+     * {@code AUTO} would have selected — either the value detected from
+     * the environment, or {@link Mode#LOCAL} when detection finds no
+     * CI markers — so callers reading this value get a concrete Mode
+     * that accurately describes the execution environment.
+     *
+     * @return the resolved mode, never {@code null}
      */
-    public Mode effectiveMode() { return effectiveMode; }
+    public Mode effectiveMode() {
+        // Honest fallback for the "caller passed nothing, we stayed on
+        // pre-v2 defaults" branch — resolve via the same AUTO-detection
+        // path the builder would have taken. Keeps the public contract
+        // non-null without destabilising the resolver, which reads the
+        // nullable internal field directly.
+        return effectiveMode != null ? effectiveMode : Builder.detectMode();
+    }
 
     /**
      * The {@link Action} the engine will take for a given {@link Situation}.
@@ -508,16 +525,61 @@ public final class AffectedTestsConfig {
             if (baseRef == null || baseRef.isBlank()) {
                 throw new IllegalArgumentException("baseRef must not be null or blank");
             }
-            if (baseRef.contains("..") && baseRef.contains("/")) {
-                // Prevent path traversal in ref names like "../../etc/passwd"
-                // (normal refs like "origin/master" or SHAs are fine)
-                String normalized = baseRef.replace("\\", "/");
-                if (normalized.contains("../")) {
-                    throw new IllegalArgumentException("baseRef contains suspicious path traversal: " + baseRef);
-                }
+            if (!isAcceptableBaseRef(baseRef)) {
+                throw new IllegalArgumentException(
+                        "baseRef is not a valid git ref, SHA, or short form: '"
+                                + baseRef + "' — expected something like "
+                                + "'origin/master', 'HEAD~1', or a 7-40 char hex SHA");
             }
             this.baseRef = baseRef;
             return this;
+        }
+
+        private static final java.util.regex.Pattern SHORT_SHA =
+                java.util.regex.Pattern.compile("^[0-9a-fA-F]{7,40}$");
+        // Covers HEAD, HEAD~N, HEAD^, HEAD^N, HEAD@{0}, master~2, etc.
+        // The refname validity of the left-hand side is delegated to
+        // JGit below; this pattern only validates the suffix grammar.
+        private static final java.util.regex.Pattern REV_EXPR =
+                java.util.regex.Pattern.compile("^([^~^@]+)([~^][0-9]*|@\\{[^}]+\\})+$");
+
+        /**
+         * Accepts any input JGit would successfully resolve against a real
+         * repository: canonical ref names (delegated to
+         * {@link org.eclipse.jgit.lib.Repository#isValidRefName(String)}),
+         * short/long SHAs, and {@code HEAD~N}/{@code ^N}/{@code @{N}}
+         * rev-expressions. Rejects path-traversal shapes by construction
+         * since JGit's refname validator already forbids {@code ..}, a
+         * leading {@code /}, and control characters — no hand-rolled
+         * string sniffing required. Keeping this decision inside the
+         * builder means every call site (CLI, Gradle plugin, programmatic
+         * users) gets the same contract without duplicating the rule.
+         */
+        private static boolean isAcceptableBaseRef(String baseRef) {
+            if (SHORT_SHA.matcher(baseRef).matches()) {
+                return true;
+            }
+            if (org.eclipse.jgit.lib.Repository.isValidRefName(baseRef)) {
+                return true;
+            }
+            // Short ref names like `master` or `origin/master` are rejected
+            // by isValidRefName (which requires a leading `refs/...`), so
+            // accept them if they at least survive the refname rules when
+            // prefixed. This preserves the pre-v1.9.19 behaviour of
+            // accepting `origin/master` as a base ref.
+            if (org.eclipse.jgit.lib.Repository.isValidRefName("refs/heads/" + baseRef)) {
+                return true;
+            }
+            java.util.regex.Matcher rev = REV_EXPR.matcher(baseRef);
+            if (rev.matches()) {
+                String head = rev.group(1);
+                if ("HEAD".equals(head)
+                        || org.eclipse.jgit.lib.Repository.isValidRefName(head)
+                        || org.eclipse.jgit.lib.Repository.isValidRefName("refs/heads/" + head)) {
+                    return true;
+                }
+            }
+            return false;
         }
         public Builder includeUncommitted(boolean v) { this.includeUncommitted = v; return this; }
         public Builder includeStaged(boolean v) { this.includeStaged = v; return this; }
