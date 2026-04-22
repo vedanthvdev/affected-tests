@@ -273,28 +273,6 @@ class PathToClassMapperTest {
     }
 
     @Test
-    void extractsModuleFromPath() {
-        assertEquals("api", mapper.extractModule("api/src/main/java/com/example/Foo.java"));
-        assertEquals("application", mapper.extractModule("application/src/test/java/com/example/FooTest.java"));
-        assertEquals("", mapper.extractModule("src/main/java/com/example/Foo.java"));
-    }
-
-    @Test
-    void extractModuleDoesNotMatchSubstring() {
-        // "someapi" should not be mis-parsed when the source dir is "src/main/java"
-        // and the module name happens to contain a source dir prefix.
-        assertEquals("someapi", mapper.extractModule("someapi/src/main/java/com/example/Foo.java"));
-        assertEquals("my-api", mapper.extractModule("my-api/src/main/java/com/example/Foo.java"));
-        assertEquals("api-gateway", mapper.extractModule("api-gateway/src/main/java/com/example/Foo.java"));
-    }
-
-    @Test
-    void extractModuleHandlesNestedPaths() {
-        assertEquals("services/core-api",
-                mapper.extractModule("services/core-api/src/main/java/com/example/Foo.java"));
-    }
-
-    @Test
     void tryMapToClassRequiresBoundaryBeforeSourceDir() {
         // Regression: a plain indexOf("src/main/java/") treats
         // "notsrc/main/java/Foo.java" as a production hit and classifies
@@ -383,5 +361,45 @@ class PathToClassMapperTest {
 
         assertTrue(result.productionClasses().contains("com.example.Foo"));
         assertTrue(result.unmappedChangedFiles().isEmpty());
+    }
+
+    @Test
+    void rejectsPathsWithTraversalSegmentAsUnmapped() {
+        // Defence-in-depth: git never emits `..` segments in diff paths,
+        // so any such segment is either malformed input or a deliberate
+        // attempt to confuse tryMapToClass. The old behaviour handed
+        // these to the source-dir mapper, which could produce absurd
+        // FQNs like `..com.example.Foo` and quietly classify them as
+        // production — dangerous because the test-dispatcher would then
+        // try to run those FQNs as test classes. The fix routes them
+        // into the unmapped bucket, which trips the UNMAPPED_FILE
+        // situation and escalates to a full run.
+        Set<String> changed = Set.of(
+                "../../etc/passwd.java",
+                "src/main/java/../../../../etc/Foo.java",
+                "legit/src/main/java/com/example/Foo.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.unmappedChangedFiles().contains("../../etc/passwd.java"),
+                "Leading ../ must land in unmapped, got: " + result.unmappedChangedFiles());
+        assertTrue(result.unmappedChangedFiles().contains("src/main/java/../../../../etc/Foo.java"),
+                "Embedded /../ must land in unmapped, got: " + result.unmappedChangedFiles());
+        assertTrue(result.productionClasses().contains("com.example.Foo"),
+                "Clean path in the same batch must still be mapped normally");
+    }
+
+    @Test
+    void allowsLegitimateFilenamesThatContainDotDotSubstring() {
+        // Negative: a file literally named `foo..bar.java` is legal on
+        // POSIX and must not be mistaken for traversal. The guard is
+        // segment-aware exactly to avoid this false positive.
+        Set<String> changed = Set.of("src/main/java/com/example/foo..bar.java");
+        MappingResult result = mapper.mapChangedFiles(changed);
+
+        assertTrue(result.productionClasses().contains("com.example.foo..bar"),
+                "File with '..' inside a name but not as a standalone segment "
+                        + "must still map, got: " + result.productionClasses());
+        assertTrue(result.unmappedChangedFiles().isEmpty(),
+                "No traversal warning should be emitted for legitimate names");
     }
 }

@@ -244,6 +244,15 @@ public final class SourceFileScanner {
      *
      * <p>Directories listed in {@link #SKIP_DIRS} are pruned during the walk.
      *
+     * <p>Candidates whose real path escapes the project root (typically
+     * because a module's source directory is a symlink planted by an
+     * attacker-controlled MR branch) are silently dropped — the plugin
+     * runs on merge-gate CI against untrusted trees, and a
+     * {@code src/main/java -> /} symlink would otherwise make
+     * {@link Files#walkFileTree} scan the entire CI runner's filesystem
+     * (DoS + path-structure leakage into {@code --explain} output).
+     * See {@link #stayInsideProjectRoot}.
+     *
      * @param projectDir  the root project directory
      * @param relativeDir the directory suffix to look for (e.g. {@code "src/test/java"})
      * @return list of absolute paths that exist and match
@@ -251,8 +260,10 @@ public final class SourceFileScanner {
     static List<Path> findAllMatchingDirs(Path projectDir, String relativeDir) {
         List<Path> matches = new ArrayList<>();
 
+        Path projectRoot = realPathOrNull(projectDir);
+
         Path rootMatch = projectDir.resolve(relativeDir);
-        if (Files.isDirectory(rootMatch)) {
+        if (stayInsideProjectRoot(rootMatch, projectRoot)) {
             matches.add(rootMatch);
         }
 
@@ -270,7 +281,7 @@ public final class SourceFileScanner {
                     }
 
                     Path candidate = dir.resolve(relativeDir);
-                    if (Files.isDirectory(candidate)) {
+                    if (stayInsideProjectRoot(candidate, projectRoot)) {
                         matches.add(candidate);
                         // Don't descend into the source tree itself — there are no
                         // sub-modules inside src/main/java/com/example/...
@@ -286,5 +297,47 @@ public final class SourceFileScanner {
 
         log.debug("Found {} directories matching '{}' under {}", matches.size(), relativeDir, projectDir);
         return matches;
+    }
+
+    /**
+     * Returns {@code true} iff {@code candidate} exists, is a directory
+     * when dereferenced, and — after symlink resolution — still lives
+     * under {@code projectRoot}. The real-path containment check is the
+     * load-bearing guard against an attacker-planted
+     * {@code src/main/java -> /} symlink in a merge-gate MR; a plain
+     * {@link Files#isDirectory(Path, java.nio.file.LinkOption...)} call
+     * without {@link LinkOption#NOFOLLOW_LINKS} would follow the
+     * symlink and produce a match pointing at the CI runner's
+     * filesystem root, which a subsequent {@link #collectJavaFiles}
+     * would then happily enumerate.
+     *
+     * <p>When {@code projectRoot} is {@code null} (e.g. the project
+     * directory itself cannot be canonicalised) we fall back to the
+     * pre-hardening behaviour — {@link Files#isDirectory} alone — so
+     * legitimate users on unusual filesystems don't silently lose
+     * discovery. The symlink hazard is specific to CI contexts where
+     * the tree is attacker-controlled, and in that threat model
+     * {@code toRealPath} on the project root is always well-defined.
+     */
+    static boolean stayInsideProjectRoot(Path candidate, Path projectRoot) {
+        if (!Files.isDirectory(candidate)) {
+            return false;
+        }
+        if (projectRoot == null) {
+            return true;
+        }
+        Path candidateReal = realPathOrNull(candidate);
+        if (candidateReal == null) {
+            return false;
+        }
+        return candidateReal.startsWith(projectRoot);
+    }
+
+    private static Path realPathOrNull(Path p) {
+        try {
+            return p.toRealPath();
+        } catch (IOException e) {
+            return null;
+        }
     }
 }

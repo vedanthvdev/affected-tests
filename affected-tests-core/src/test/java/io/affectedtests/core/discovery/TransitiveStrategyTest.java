@@ -130,4 +130,42 @@ class TransitiveStrategyTest {
         assertTrue(depth2Result.contains("com.example.CTest"),
                 "Depth 2 should reach CTest");
     }
+
+    @Test
+    void discoversConsumerTestsForDeletedProductionClass() throws IOException {
+        // The fixture mirrors a `git rm FooService.java` MR: FooService is in
+        // the changed set (surfaced by GitChangeDetector via the old path)
+        // but the file itself is no longer on disk. BarService still
+        // references FooService; BarServiceTest exercises BarService and is
+        // therefore the test most likely to fail on the broken consumer.
+        // Pre-fix, the reverse-dependency map filtered out FooService because
+        // the on-disk scan could not derive an FQN for the deleted file, and
+        // the transitive walk returned empty — silently dropping the test on
+        // the MR. The fix unions `changedProductionClasses` into
+        // `allKnownFqns` inside buildReverseDependencyMap so edges to
+        // deleted FQNs survive.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        // FooService deliberately NOT written — simulating the deletion.
+        Files.writeString(prodDir.resolve("BarService.java"), """
+                package com.example;
+
+                public class BarService {
+                    private FooService fooService;
+                }
+                """);
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("BarServiceTest.java"),
+                "package com.example;\npublic class BarServiceTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.FooService"), tempDir);
+
+        assertTrue(result.contains("com.example.BarServiceTest"),
+                "Must discover tests for consumers of a deleted production class — "
+                        + "otherwise a pure `git rm` MR silently drops coverage on "
+                        + "the very tests that would surface the breakage");
+    }
 }

@@ -128,18 +128,48 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         Set<String> importedFqns = new HashSet<>();
         Set<String> wildcardPackages = new HashSet<>();
         for (ImportDeclaration imp : cu.getImports()) {
-            if (imp.isAsterisk()) {
-                wildcardPackages.add(imp.getNameAsString());
+            String name = imp.getNameAsString();
+            if (imp.isStatic()) {
+                // Static imports are member-scoped, not type-scoped. The name
+                // reported by JavaParser for `import static a.b.C.MAX;` is
+                // `a.b.C.MAX` and for `import static a.b.C.*;` is `a.b.C`
+                // (with isAsterisk=true). The thing a test actually depends
+                // on in both cases is the class `a.b.C`, so we normalise
+                // back to the class FQN for direct-import matching. Before
+                // this, a test that only referenced a changed class through
+                // a `import static … .CONSTANT;` was silently missed
+                // because the name in importedFqns had a member suffix that
+                // never equalled any changedFqn.
+                String classFqn = imp.isAsterisk()
+                        ? name
+                        : stripLastSegment(name);
+                if (classFqn != null) {
+                    importedFqns.add(classFqn);
+                }
+            } else if (imp.isAsterisk()) {
+                wildcardPackages.add(name);
             } else {
-                importedFqns.add(imp.getNameAsString());
+                importedFqns.add(name);
             }
         }
 
-        // Tier 1: Direct import match
+        // Tier 1: Direct import match. `innerClassMatch` also fires when
+        // an import targets a nested class of the changed outer — e.g.
+        // the test writes `import c.d.Outer.Inner;` and the diff touches
+        // `c.d.Outer` (PathToClassMapper is file-based, so it only
+        // surfaces the outer FQN for the nested class's change). Without
+        // this, a test that only uses the inner class is silently missed.
         for (String changedFqn : changedFqns) {
             if (importedFqns.contains(changedFqn)) {
                 log.debug("  Direct import match: {}", changedFqn);
                 return true;
+            }
+            String innerPrefix = changedFqn + ".";
+            for (String imported : importedFqns) {
+                if (imported.startsWith(innerPrefix)) {
+                    log.debug("  Inner-class import match: {} <- {}", changedFqn, imported);
+                    return true;
+                }
             }
         }
 
@@ -199,6 +229,20 @@ public final class UsageStrategy implements TestDiscoveryStrategy {
         }
 
         return false;
+    }
+
+    /**
+     * Returns {@code name} with the final {@code .segment} removed. For
+     * {@code "a.b.C.MAX"} returns {@code "a.b.C"}; for a single-segment
+     * input returns {@code null} (the input is already as stripped as it
+     * can be and clearly wasn't a qualified member reference).
+     */
+    static String stripLastSegment(String name) {
+        int idx = name.lastIndexOf('.');
+        if (idx < 0) {
+            return null;
+        }
+        return name.substring(0, idx);
     }
 
     /**

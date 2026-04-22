@@ -131,4 +131,37 @@ class ImplementationStrategyTest {
 
         assertTrue(result.isEmpty());
     }
+
+    @Test
+    void findsGrandchildImplementationThroughMultiLevelHierarchy() throws IOException {
+        // Hierarchy: interface A  <--  abstract class B implements A
+        //                          <-- class C extends B
+        // Only C has a direct test (CTest). Pre-fix the strategy found B
+        // on a single pass and stopped — CTest (the only real coverage
+        // of A's behaviour through an actual implementation) was
+        // silently dropped. The fixpoint loop re-runs with B as a target
+        // so C is found on the second pass, and naming-strategy then
+        // picks up CTest.
+        Path prodDir = tempDir.resolve("src/main/java/com/example");
+        Files.createDirectories(prodDir);
+        Files.writeString(prodDir.resolve("A.java"),
+                "package com.example;\npublic interface A {}");
+        Files.writeString(prodDir.resolve("B.java"),
+                "package com.example;\npublic abstract class B implements A {}");
+        Files.writeString(prodDir.resolve("C.java"),
+                "package com.example;\npublic class C extends B {}");
+
+        Path testDir = tempDir.resolve("src/test/java/com/example");
+        Files.createDirectories(testDir);
+        Files.writeString(testDir.resolve("CTest.java"),
+                "package com.example;\npublic class CTest {}");
+
+        Set<String> result = strategy.discoverTests(
+                Set.of("com.example.A"), tempDir);
+
+        assertTrue(result.contains("com.example.CTest"),
+                "Grandchild's test must be discovered through multi-level "
+                        + "hierarchy — otherwise interface-level changes silently "
+                        + "drop the tests of the only concrete implementor");
+    }
 }

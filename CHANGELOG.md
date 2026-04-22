@@ -6,6 +6,123 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — post-v1.9.18 code-review pass
+
+A four-reviewer sweep (correctness, security, maintainability, simplicity)
+ran against the plugin source tree as it landed in v1.9.18. Ten findings
+were triaged into two tiers — safety-critical (Tier 1) and correctness
+gaps that silently dropped tests in real hierarchies (Tier 2) — and both
+tiers are resolved in this release. Tier 3 polish items ship in the same
+PR because they touch adjacent code and keep v2.0 from carrying dead
+weight.
+
+- **Transitive strategy no longer drops consumer tests when a production
+  class is deleted.** `TransitiveStrategy.buildReverseDependencyMap`
+  built its `allKnownFqns` set purely from files currently on disk.
+  A pure `git rm FooService.java` MR ended up with `FooService` in the
+  changed set (surfaced by `GitChangeDetector` via the old path) but
+  nowhere in the reverse map, so the consumers of `FooService` — the
+  only tests that would have caught the breakage — were silently
+  excluded. The fix unions `changedProductionClasses` into
+  `allKnownFqns` before walking. Regression lives in
+  `TransitiveStrategyTest#discoversConsumerTestsForDeletedProductionClass`.
+- **`SourceFileScanner` no longer follows symlinks out of the project
+  root.** An MR that introduced `src/main/java` as a symlink to `/`
+  (or any path outside the project) would walk the victim's filesystem,
+  enumerating arbitrary `.java` files in the scanner's match list and
+  inflating the scan to the point of DoS on laptops. Matched filenames
+  then flowed into `--explain` samples and the WARN log, which is where
+  the leak would have become visible to the attacker on CI. 
+  `findAllMatchingDirs` now canonicalises every candidate via
+  `Path.toRealPath()` and rejects anything whose real path does not
+  start with the project root's real path. Two regressions:
+  `rejectsSymlinkEscapingProjectRoot` covers the exploit;
+  `acceptsSymlinkThatStaysInsideProjectRoot` prevents the cure from
+  being worse than the disease for monorepos that symlink between
+  sibling modules.
+- **Log output is now sanitised.** Filenames from the git diff can
+  legally contain newlines, carriage returns, and ANSI escape bytes —
+  JGit faithfully preserves them. Before this release the
+  `--explain` sample lines, the unmapped-file WARN, the malformed-FQN
+  WARN in the Gradle task, and the per-test INFO line in the engine
+  all fed those bytes straight into SLF4J, which means a hostile MR
+  could forge whole log lines (including fake
+  `Affected Tests: SELECTED` headers) or colour legitimate log lines
+  to hide warnings from a human reviewer. New `LogSanitizer` escapes
+  the C0 range (NUL..US), DEL (0x7F), and the C1 range (0x80..0x9F,
+  which includes single-byte CSI) into visible `\\xHH` / `\\n` / `\\r`
+  / `\\t` forms, and every filename-derived log site — four in total
+  — now routes through it.
+- **`AffectedTestsConfig#effectiveMode()` now always returns a concrete
+  mode.** The Javadoc promised one of `LOCAL`, `CI`, `STRICT`; the
+  getter returned `null` for zero-config callers, so the documented
+  switch shape NPE'd on anyone who followed the Javadoc to the letter.
+  The public getter now falls back to `Builder.detectMode()` when the
+  internal field is unset — preserving the nullable internal signal
+  that `resolveSituationActions` uses to distinguish "mode was
+  explicitly set" from "we inferred it" — and a regression test
+  (`effectiveModeIsAlwaysConcreteForZeroConfigCallers`) locks the
+  contract down.
+- **`outOfScopeTestDirs`/`outOfScopeSourceDirs` now catch literal
+  entries whose value equals the resolved directory path.** The
+  matcher treated `sub/src/main/java` as a prefix only and relied on
+  `contains("/sub/src/main/java/")`. `ProjectIndex` relativises source
+  directories with `Path.relativize`, which never emits a trailing
+  slash, so the contain-check missed its only real input shape. The
+  literal branch now also accepts `path.equals(bare)` and
+  `path.endsWith("/" + bare)`. Regression:
+  `OutOfScopeMatchersTest#literalEntryMatchesExactDirectoryPath`.
+- **`UsageStrategy` now selects tests that import inner classes or use
+  static imports of the changed class.** Pre-fix, `import x.Outer.Inner`
+  and `import static x.Constants.MAX` did not register as a reference
+  to `x.Outer` / `x.Constants`, so a genuinely affected test whose only
+  reference to the changed surface was a static constant was silently
+  dropped. `testReferencesChangedClass` now strips the last segment
+  from static imports (handling both the named-member and
+  `x.C.*` shapes) and prefix-matches inner-class imports against
+  changed FQNs. Three regressions cover the inner-class direct import,
+  the static-member import, and the static wildcard.
+- **`ImplementationStrategy` now performs a fixpoint walk of the
+  subtype closure.** Given `interface A <- abstract B implements A
+  <- class C extends B`, only B is a direct subtype of A. A single
+  pass stopped at B, so `CTest` — the only concrete-implementor test
+  — was silently dropped whenever A changed. The strategy now seeds
+  each subsequent pass with the freshly-found impls, bounded by
+  `transitiveDepth` as a sanity cap. Regression:
+  `findsGrandchildImplementationThroughMultiLevelHierarchy`.
+- **`PathToClassMapper` rejects path-traversal segments in diff
+  input.** Git never emits `..` as a standalone segment in diff paths,
+  so one appearing there is either a malformed ref or an attempt to
+  confuse the mapper. Pre-fix, `../../etc/passwd.java` was handed to
+  `tryMapToClass`, which produced an FQN starting with `..` and
+  classified it as production — a shape the test dispatcher would then
+  try to run. The segment check now routes those inputs to the
+  unmapped bucket (at `debug` level, so a malicious diff cannot flood
+  the build log), which trips the `UNMAPPED_FILE` situation and
+  escalates to a full run on the engine's normal WARN path. A
+  segment-aware check keeps legitimate filenames like `foo..bar.java`
+  working.
+- **`baseRef` validation is now JGit-native.** The v1.x check rejected
+  the single shape `contains("../")` and accepted everything else —
+  including control characters, leading slashes, and trailing
+  `.lock`, all of which JGit's own refname rules already forbid. The
+  builder now delegates to `Repository.isValidRefName` (canonical
+  `refs/...` names), accepts 7-40 char hex SHAs directly, and accepts
+  short rev-expressions like `HEAD~3` and `master^2`. The
+  error message on rejection explicitly names the three accepted
+  shapes so consumers have something actionable instead of "suspicious
+  path traversal".
+
+### Removed
+
+- `PathToClassMapper#extractModule` and its three unit tests. The
+  method had no in-tree caller and the `extractModuleFromDirs` branch
+  under it duplicated logic that `tryMapToClass` already performs more
+  carefully. Dead code by construction; removing it keeps the mapper's
+  surface aligned with what the engine actually uses.
+
+## [1.9.18]
+
 ### Changed — behaviour flip, read this
 
 - **`includeUncommitted` and `includeStaged` now default to `false`

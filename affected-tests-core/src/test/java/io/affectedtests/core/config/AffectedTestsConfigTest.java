@@ -249,6 +249,27 @@ class AffectedTestsConfigTest {
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("abc123def456").build());
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("refs/heads/feature-branch").build());
         assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("HEAD~3").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("HEAD").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("HEAD^").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("master~2").build());
+        assertDoesNotThrow(() -> AffectedTestsConfig.builder().baseRef("a".repeat(40)).build());
+    }
+
+    @Test
+    void baseRefRejectsRefnameSlurGarbage() {
+        // Regression: the v1.x check accepted anything without a `/..` in
+        // it. JGit's refname rules reject a far richer set of garbage
+        // (control chars, @{} outside rev-expressions, trailing `.lock`,
+        // leading `/`, etc.). Lock in that those shapes are refused at
+        // the builder boundary so downstream JGit calls never see them.
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("/leading-slash").build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("trailing.lock").build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("contains\nnewline").build());
+        assertThrows(IllegalArgumentException.class, () ->
+                AffectedTestsConfig.builder().baseRef("..").build());
     }
 
     @Test
@@ -390,5 +411,25 @@ class AffectedTestsConfigTest {
     private static String singleWarning(AffectedTestsConfig config, String message) {
         assertEquals(1, config.deprecationWarnings().size(), message);
         return config.deprecationWarnings().get(0);
+    }
+
+    @Test
+    void effectiveModeIsAlwaysConcreteForZeroConfigCallers() {
+        // Regression: pre-fix, a zero-config caller got mode()=AUTO and
+        // effectiveMode()=null, despite the javadoc's "Always one of
+        // LOCAL, CI or STRICT" contract. Any downstream code following
+        // the documented shape (`switch(config.effectiveMode())`) would
+        // NPE. The fix resolves null to the AUTO-detected mode at the
+        // getter.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .baseRef("origin/master")
+                .build();
+        assertNotNull(config.effectiveMode(),
+                "effectiveMode() must never return null — it is the documented "
+                        + "input to operator-facing switches on the resolved mode");
+        assertTrue(config.effectiveMode() == Mode.LOCAL
+                        || config.effectiveMode() == Mode.CI
+                        || config.effectiveMode() == Mode.STRICT,
+                "effectiveMode() must be one of the three concrete modes");
     }
 }
