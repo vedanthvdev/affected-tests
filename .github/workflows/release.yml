@@ -58,25 +58,62 @@ jobs:
             echo "already_tagged=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Pick the release version. Three sources in priority order:
+      #
+      #   1. `workflow_dispatch` input — for ad-hoc manual releases.
+      #      Wins over everything because it's the most explicit.
+      #   2. A `.release-version` file committed at repo root — for
+      #      pre-committing the next minor/major on a push-to-master
+      #      release without needing manual dispatch coordination. The
+      #      consuming PR lands the file in the same commit that wants
+      #      the non-default version; this workflow picks it up, tags
+      #      that version, then deletes the file in a follow-up commit
+      #      so subsequent pushes fall back to auto-patch-increment.
+      #   3. Neither — axion-release auto-increments the patch number
+      #      off the latest tag. Normal ongoing behaviour.
+      #
+      # The file path is validated as a SemVer string before use so a
+      # malformed value blocks the release at config time rather than
+      # cutting a bogus tag.
+      - name: Resolve explicit release version
+        id: version_override
+        run: |
+          if [[ -n "$RELEASE_VERSION_INPUT" ]]; then
+            echo "Using workflow_dispatch input: $RELEASE_VERSION_INPUT"
+            echo "source=input" >> "$GITHUB_OUTPUT"
+            echo "value=$RELEASE_VERSION_INPUT" >> "$GITHUB_OUTPUT"
+          elif [[ -f .release-version ]]; then
+            V=$(tr -d '[:space:]' < .release-version)
+            if [[ -z "$V" ]]; then
+              echo "::error::.release-version file exists but is empty"
+              exit 1
+            fi
+            if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+              echo "::error::.release-version value '$V' is not SemVer (MAJOR.MINOR.PATCH[-prerelease])"
+              exit 1
+            fi
+            echo "Using .release-version file: $V"
+            echo "source=file" >> "$GITHUB_OUTPUT"
+            echo "value=$V" >> "$GITHUB_OUTPUT"
+          else
+            echo "No explicit version — axion-release will auto-increment patch."
+            echo "source=auto" >> "$GITHUB_OUTPUT"
+          fi
+
       # Only create a new tag if HEAD is not already tagged. If a previous run
       # tagged successfully but failed during publish, re-running this workflow
       # will skip tagging and proceed straight to the "publish if missing" step
       # below — that's what makes the pipeline idempotent.
-      #
-      # Version override: on workflow_dispatch with a non-empty `version`
-      # input, pass `-Prelease.version=<VERSION>` so axion-release tags that
-      # exact version instead of auto-incrementing the patch. On push events,
-      # `RELEASE_VERSION_INPUT` is empty and the call stays identical to the
-      # pre-override form.
       - name: Release (tag and push)
         if: steps.tag_check.outputs.already_tagged == 'false'
+        env:
+          VERSION_OVERRIDE: ${{ steps.version_override.outputs.value }}
+          VERSION_OVERRIDE_SOURCE: ${{ steps.version_override.outputs.source }}
         run: |
           VERSION_ARG=()
-          if [[ -n "$RELEASE_VERSION_INPUT" ]]; then
-            echo "Explicit release version requested: $RELEASE_VERSION_INPUT"
-            VERSION_ARG=("-Prelease.version=$RELEASE_VERSION_INPUT")
-          else
-            echo "No explicit version — axion-release will auto-increment patch."
+          if [[ "$VERSION_OVERRIDE_SOURCE" != "auto" ]]; then
+            echo "Explicit release version requested (source=$VERSION_OVERRIDE_SOURCE): $VERSION_OVERRIDE"
+            VERSION_ARG=("-Prelease.version=$VERSION_OVERRIDE")
           fi
           ./gradlew release -Prelease.pushTagsOnly \
             "${VERSION_ARG[@]}" \
@@ -140,3 +177,25 @@ jobs:
           else
             echo "GitHub Release $TAG already exists — skipping"
           fi
+
+      # If the release version came from a `.release-version` file, delete
+      # the file now that the tag has been pushed, the plugin has been
+      # published, and the GitHub Release exists. Leaving the file in place
+      # would either re-ship the same version on the next push (rejected
+      # by Plugin Portal → failed job) or starve auto-patch-increment.
+      #
+      # The cleanup commit is tagged `[skip ci]` so this workflow does
+      # not trigger itself in a loop. Only runs when we actually tagged
+      # (already_tagged == 'false') AND the version came from the file —
+      # a workflow_dispatch input override must not consume the file, and
+      # a rerun against an already-tagged HEAD must not touch the tree.
+      - name: Consume .release-version override
+        if: steps.version_override.outputs.source == 'file' && steps.tag_check.outputs.already_tagged == 'false'
+        env:
+          TAG: ${{ steps.released.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .release-version
+          git commit -m "chore(release): consume .release-version after shipping $TAG [skip ci]"
+          git push origin "HEAD:$GH_REF_NAME"

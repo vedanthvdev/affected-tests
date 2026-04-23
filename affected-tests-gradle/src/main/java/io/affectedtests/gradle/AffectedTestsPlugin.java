@@ -1,5 +1,6 @@
 package io.affectedtests.gradle;
 
+import org.gradle.api.GradleException;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
 import org.gradle.api.file.Directory;
@@ -87,6 +88,21 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             // and Gradle would fail with "No tests found for given includes".
             rootProject.allprojects(p -> p.getPluginManager().withPlugin("java", unused ->
                     task.dependsOn(p.getTasks().named("testClasses"))));
+        });
+
+        // Validate scalar-range constraints at configuration completion so
+        // operators get feedback during IDE sync / a dry `./gradlew help`
+        // run instead of having to execute the task to see a negative
+        // timeout get rejected. The task-side builder keeps its own
+        // range check as belt-and-braces for programmatic callers that
+        // bypass the extension.
+        project.afterEvaluate(p -> {
+            Long timeout = extension.getGradlewTimeoutSeconds().getOrNull();
+            if (timeout != null && timeout < 0L) {
+                throw new GradleException(
+                        "affectedTests.gradlewTimeoutSeconds must be >= 0 "
+                                + "(0 disables the timeout); got " + timeout);
+            }
         });
     }
 

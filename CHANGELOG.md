@@ -6,6 +6,107 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v2.1.0] — DSL polish on top of the v2 breaking release
+
+v2.1.0 is the **first publicly tagged v2 release**. It bundles everything
+the v2.0 branch landed in master (the legacy-knob removal below) with two
+small-but-sharp polish fixes that surfaced during a real-world pilot of
+v2.0 against a Modulr micro-service. The polish fixes are strictly
+additive on top of v2.0 behaviour — operators already on the v2 DSL see
+no functional change, only earlier and clearer errors when something is
+misconfigured.
+
+### Changed — targeted error messages when v1 knobs appear in build.gradle
+
+Before v2.1, a v1 user who dropped `runAllIfNoMatches = false` into their
+`affectedTests { }` block got Gradle's default unknown-property error:
+
+```
+> Could not set unknown property 'runAllIfNoMatches' for extension
+  'affectedTests' of type io.affectedtests.gradle.AffectedTestsExtension.
+```
+
+Correct, but unhelpful — it names the removed knob without naming the v2
+replacement, forcing the operator to grep the CHANGELOG to find the fix.
+
+v2.1 intercepts the assignment on the extension and swaps that generic
+error for a targeted migration hint pointing at the exact `onXxx` knob
+that took over each responsibility:
+
+```
+> affectedTests.runAllIfNoMatches was removed in v2.0.0. Use
+  onEmptyDiff = "full_suite" and/or onDiscoveryEmpty = "full_suite"
+  instead (or set mode = "ci" / "strict" to get those defaults). See
+  CHANGELOG.md v2.0 for the full migration table.
+```
+
+Matching shims for `runAllOnNonJavaChange` and `excludePaths` point at
+`onUnmappedFile` and at the `ignorePaths` vs `outOfScopeTestDirs`
+distinction respectively. The v1 names are still rejected — v2 does not
+re-introduce the knobs — but the rejection is now actionable.
+
+Kotlin DSL callers already got a compile error naming the removed
+property, so these shims only fire in Groovy DSL, which is where the
+generic error lived.
+
+Regression coverage:
+
+- `AffectedTestsPluginTest.legacyKnobAssignmentThrowsWithV2MigrationHint_runAllIfNoMatches`
+- `AffectedTestsPluginTest.legacyKnobAssignmentThrowsWithV2MigrationHint_runAllOnNonJavaChange`
+- `AffectedTestsPluginTest.legacyKnobAssignmentThrowsWithV2MigrationHint_excludePaths`
+
+Each pins both the v1 knob name *and* the v2 replacement name in the
+error text, so a well-intentioned "tidy up the error message" refactor
+that drops either half gets caught.
+
+### Added — `.release-version` override file for merge-to-master minor/major releases
+
+Until v2.1, the only way to ship a minor/major bump instead of an
+auto-patch-increment was to run the release workflow via
+`workflow_dispatch` with an explicit `version` input. That meant every
+minor release required coordination between "merge the PR" and
+"manually trigger the workflow" — and if the auto-release on the merge
+push got there first, it would mint an unwanted patch tag the operator
+then had to work around.
+
+v2.1 teaches `.github/workflows/release.yml` a third version source: a
+`.release-version` file committed at repo root. When the merge-to-master
+release workflow finds the file, it reads the SemVer string, validates
+it, and tags that exact version instead of auto-incrementing the patch.
+After a successful publish the workflow deletes the file in a follow-up
+commit tagged `[skip ci]` (so the cleanup push doesn't re-trigger the
+release), which keeps ongoing patch releases on auto-increment.
+
+Priority order on `./gradlew release`:
+
+1. `workflow_dispatch` `version` input (manual dispatch — unchanged).
+2. `.release-version` file at repo root (new in v2.1).
+3. Auto-patch-increment (default — unchanged).
+
+This release itself uses the file mechanism to ship as `v2.1.0` on
+top of the auto-patch-increment line that would otherwise have cut
+`v1.9.24`. See README §Versioning for the decision matrix.
+
+### Changed — `gradlewTimeoutSeconds` range check moved to configuration time
+
+The `gradlewTimeoutSeconds >= 0` check added in v1.9.22 lived on the
+core config builder, which is only invoked at task-execution time. That
+meant an invalid value like `gradlewTimeoutSeconds = -5` passed through
+configuration silently and only blew up when someone actually ran
+`./gradlew affectedTest`. IDE sync, `./gradlew help`, and
+`./gradlew tasks` all ran green against a misconfigured build.
+
+v2.1 adds a mirror check in `AffectedTestsPlugin#apply` via
+`project.afterEvaluate`, so the same error now fires at configuration
+completion. IDE sync and any dry Gradle invocation now surface the
+misconfiguration immediately. The builder-side check stays in place as
+belt-and-braces for programmatic callers that bypass the DSL extension.
+
+Regression coverage:
+`AffectedTestsPluginTest.negativeGradlewTimeoutFailsAtConfigurationTime`
+walks the thrown exception chain end-to-end and pins the knob name, the
+rejected value, and the `>= 0` range bound in the error message.
+
 ### Removed — v2.0 breaking release: legacy v1 knobs are gone
 
 The three v1 configuration knobs that were deprecated across the v1.9.x

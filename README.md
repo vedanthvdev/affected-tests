@@ -243,6 +243,11 @@ affectedTests {
     // output is not available when a timeout is set — leave at 0 and
     // enforce the deadline at the CI-job level if you rely on scan
     // ingestion of child-process output.
+    //
+    // Negative values are rejected. Since v2.1 the range check fires at
+    // configuration time (IDE sync / `./gradlew help`) rather than only
+    // when the task executes, so a typo like `-5` is caught without
+    // needing to actually launch `affectedTest`.
     gradlewTimeoutSeconds  = 1800  // 30 min; use 3600 for suites with integration tests
 
     // ---------------- Discovery tuning ----------------
@@ -340,11 +345,22 @@ The `onUnmappedFile = "full_suite"` default follows the "run more, never run les
 
 ### Migrating from v1 config
 
-**v2.0.0 removed the three v1 legacy knobs.** If any of these still appear in your `build.gradle`, Gradle configuration will fail with an unknown-property error before the `affectedTest` task runs:
+**v2.0.0 removed the three v1 legacy knobs.** If any of these still appear in your `build.gradle`, Gradle configuration will fail before the `affectedTest` task runs:
 
 - `runAllIfNoMatches`
 - `runAllOnNonJavaChange`
 - `excludePaths`
+
+Since **v2.1.0**, the error is targeted: instead of Gradle's generic "unknown property" message, you'll see a migration hint naming the exact v2 replacement knob. For example, `runAllIfNoMatches = false` now fails with:
+
+```
+> affectedTests.runAllIfNoMatches was removed in v2.0.0. Use
+  onEmptyDiff = "full_suite" and/or onDiscoveryEmpty = "full_suite"
+  instead (or set mode = "ci" / "strict" to get those defaults). See
+  CHANGELOG.md v2.0 for the full migration table.
+```
+
+Shims exist for all three legacy knobs; Kotlin DSL callers already get a compile error naming the removed property.
 
 #### Deprecation timeline
 
@@ -482,6 +498,7 @@ Versions are managed automatically via [axion-release](https://github.com/allegr
 | Check what version this branch is | `./gradlew currentVersion` |
 | Auto patch release (e.g. `1.9.12` → `1.9.13`) | Merge to `master` — the release workflow does the rest |
 | Force a minor or major release (e.g. `1.9.x` → `1.10.0`) | GitHub → Actions → **Release** → *Run workflow* → fill `version` (e.g. `1.10.0`), or run `gh workflow run release.yml --ref master -f version=1.10.0` |
+| Pin a minor/major on a **merge-to-master** release (no dispatch) | Commit a `.release-version` file at repo root containing the SemVer (e.g. `2.1.0`) in the same PR whose merge should ship that version. The release workflow tags that version, publishes it, then auto-deletes the file in a `[skip ci]` follow-up commit so the next push falls back to auto-patch-increment. |
 | Release-candidate / pre-release | Trigger *Run workflow* with `version: 1.10.0-RC1`, or locally: `./gradlew release -Prelease.versionIncrementer=incrementPrerelease` |
 | Manually re-run a failed publish | Re-trigger the workflow on the already-tagged commit — portal-check + release-check steps are idempotent |
 
