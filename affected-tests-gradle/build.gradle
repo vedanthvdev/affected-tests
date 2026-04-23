@@ -47,12 +47,40 @@ configurations {
     functionalTestRuntimeOnly.extendsFrom testRuntimeOnly
 }
 
+dependencies {
+    // Cucumber-JVM + JUnit Platform Suite power the human-readable e2e
+    // scenario layer under src/functionalTest/resources/.../features.
+    // Every feature scenario spawns a real Gradle TestKit build so the
+    // assertions cover the exact plugin surface consumers like
+    // security-service see, not just the decision engine. See
+    // RunCucumberFunctionalTest for the JUnit Platform Suite entrypoint.
+    functionalTestImplementation 'io.cucumber:cucumber-java:7.25.0'
+    functionalTestImplementation 'io.cucumber:cucumber-junit-platform-engine:7.25.0'
+    // Required so Cucumber can constructor-inject the shared `World`
+    // into step-def classes; without a DI container, CucumberException
+    // "No suitable constructor" blows up at scenario discovery time.
+    functionalTestImplementation 'io.cucumber:cucumber-picocontainer:7.25.0'
+    functionalTestImplementation 'org.junit.platform:junit-platform-suite:1.14.3'
+    // JGit mirrors the way the core engine tests construct temp repos —
+    // reusing the same dependency means the feature-file scenarios build
+    // history with the exact semantics the engine will later parse.
+    functionalTestImplementation 'org.eclipse.jgit:org.eclipse.jgit:7.6.0.202603022253-r'
+}
+
 tasks.register('functionalTest', Test) {
-    description = 'Runs functional tests with Gradle TestKit.'
+    description = 'Runs functional tests with Gradle TestKit, including Cucumber e2e scenarios.'
     group = 'verification'
     testClassesDirs = sourceSets.functionalTest.output.classesDirs
     classpath = sourceSets.functionalTest.runtimeClasspath
     useJUnitPlatform()
+
+    // Cucumber-JVM's JUnit Platform engine scans the classpath resources of
+    // the running test JVM for .feature files. Without this, feature files
+    // placed under src/functionalTest/resources are packaged into the
+    // classpath but the engine still needs glue-code packages pointed at
+    // explicitly so step definitions get picked up deterministically.
+    systemProperty 'cucumber.glue', 'io.affectedtests.gradle.e2e.steps'
+    systemProperty 'cucumber.publish.quiet', 'true'
 }
 
 tasks.named('check') {
