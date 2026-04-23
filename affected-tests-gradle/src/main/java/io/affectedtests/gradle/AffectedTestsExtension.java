@@ -1,5 +1,8 @@
 package io.affectedtests.gradle;
 
+import java.util.List;
+
+import org.gradle.api.GradleException;
 import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.Property;
 
@@ -244,10 +247,82 @@ public abstract class AffectedTestsExtension {
      *
      * <p>Recommended values: {@code 1800} (30 min) for merge-gate
      * unit-test runs, {@code 3600} (1 hour) for suites that include
-     * integration tests. Must be {@code >= 0}; the core config
-     * builder rejects negative values at build-config time.
+     * integration tests. Must be {@code >= 0}; the plugin rejects
+     * negative values at {@code afterEvaluate} (configuration) time
+     * and again at task-execution time as belt-and-braces.
      *
      * @return the gradlew timeout property in seconds
      */
     public abstract Property<Long> getGradlewTimeoutSeconds();
+
+    // ------------------------------------------------------------------
+    // v2 migration hints for the three legacy knobs removed in v2.0.
+    //
+    // The properties themselves are gone, so Gradle's default behaviour
+    // for `affectedTests.runAllIfNoMatches = false` is a terse
+    // "Could not set unknown property 'runAllIfNoMatches'" — correct
+    // but unhelpful for operators reading a v1 build.gradle.
+    //
+    // These shim setters are invoked by Groovy DSL assignment
+    // (`ext.foo = bar` maps to `setFoo(bar)` on the managed type) and
+    // replace the terse error with an actionable v2 replacement
+    // pointing at the exact `onXxx` knob to use. Kotlin DSL callers
+    // get a compile error referencing the removed property, which is
+    // already clearer than Groovy's runtime error, so no shim needed
+    // there.
+    //
+    // If v2 ever adds real `runAllIfNoMatches` / `runAllOnNonJavaChange`
+    // / `excludePaths` semantics back (unlikely — the v2 names are
+    // strictly richer), delete these shims and re-introduce the
+    // abstract Property<T> getters.
+    // ------------------------------------------------------------------
+
+    /**
+     * Migration shim: {@code runAllIfNoMatches} was removed in v2.0.
+     * Intercepts a v1-style assignment in Groovy DSL and raises a
+     * targeted migration error instead of Gradle's generic
+     * "unknown property" failure.
+     *
+     * @param ignored v1 boolean value (never read)
+     * @throws GradleException always, with a v2 replacement hint
+     */
+    @SuppressWarnings("unused")
+    public void setRunAllIfNoMatches(Object ignored) {
+        throw new GradleException(
+                "affectedTests.runAllIfNoMatches was removed in v2.0.0. "
+                        + "Use onEmptyDiff = \"full_suite\" and/or "
+                        + "onDiscoveryEmpty = \"full_suite\" instead "
+                        + "(or set mode = \"ci\" / \"strict\" to get those defaults). "
+                        + "See CHANGELOG.md v2.0 for the full migration table.");
+    }
+
+    /**
+     * Migration shim: {@code runAllOnNonJavaChange} was removed in v2.0.
+     *
+     * @param ignored v1 boolean value (never read)
+     * @throws GradleException always, with a v2 replacement hint
+     */
+    @SuppressWarnings("unused")
+    public void setRunAllOnNonJavaChange(Object ignored) {
+        throw new GradleException(
+                "affectedTests.runAllOnNonJavaChange was removed in v2.0.0. "
+                        + "Use onUnmappedFile = \"full_suite\" (v1 true) or "
+                        + "onUnmappedFile = \"selected\" (v1 false) instead. "
+                        + "See CHANGELOG.md v2.0 for the full migration table.");
+    }
+
+    /**
+     * Migration shim: {@code excludePaths} was removed in v2.0.
+     *
+     * @param ignored v1 list value (never read)
+     * @throws GradleException always, with a v2 replacement hint
+     */
+    @SuppressWarnings("unused")
+    public void setExcludePaths(List<?> ignored) {
+        throw new GradleException(
+                "affectedTests.excludePaths was removed in v2.0.0. "
+                        + "Use ignorePaths (glob patterns that bypass test selection) "
+                        + "or outOfScopeTestDirs (test dirs the affectedTest task never dispatches) "
+                        + "depending on intent. See CHANGELOG.md v2.0 for the full migration table.");
+    }
 }
