@@ -479,8 +479,26 @@ public abstract class AffectedTestTask extends DefaultTask {
             // even though the spelling is literally in the valid list.
             return Mode.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
+            // Mention the AUTO fallback explicitly: the most common
+            // cause of a bad value here is a CI template that forgot
+            // to scrub an unset variable, and the operator needs to
+            // know they can just leave the -P off (or pass an empty
+            // value — see the plugin's convention wiring) to get the
+            // environment-aware default.
+            //
+            // We list the actual trigger set (mirror
+            // AffectedTestsConfig.Builder.detectMode) rather than
+            // just "CI=true" because a Jenkins or Azure Pipelines
+            // operator reading a "CI=true is exported" hint on
+            // their own runner would wrongly conclude AUTO falls
+            // back to LOCAL — JENKINS_HOME / TF_BUILD flip it to CI
+            // without CI=true ever being set.
             throw new GradleException("Unknown affectedTests.mode '" + raw
-                    + "'. Expected one of: auto, local, ci, strict.", e);
+                    + "'. Expected one of: auto, local, ci, strict "
+                    + "(omit the value or leave -PaffectedTestsMode unset to keep "
+                    + "the AUTO default, which picks CI on recognised runners — "
+                    + "CI=true, GITHUB_ACTIONS, GITLAB_CI, JENKINS_HOME, CIRCLECI, "
+                    + "TRAVIS, BUILDKITE, TF_BUILD).", e);
         }
     }
 
@@ -1435,23 +1453,34 @@ public abstract class AffectedTestTask extends DefaultTask {
      */
     private static void appendDiscoveryIncompleteHint(List<String> lines,
                                                       AffectedTestsResult result) {
-        if (result.action() == Action.SELECTED) {
-            lines.add("Hint:            one or more Java files in the diff failed to parse, "
-                    + "so discovery ran with missing inputs.");
-            lines.add("                 The resolved selection is necessarily partial — fix the "
-                    + "parse error to recover a precise selection, or set "
-                    + "onDiscoveryIncomplete = 'full_suite' to escalate "
-                    + "(CI and STRICT modes already do).");
-            return;
-        }
-        // FULL_SUITE (or any non-SELECTED resolution): escalation has
-        // already handled the under-testing risk, so the hint's job
-        // is only to point the operator at the root cause for next
-        // time — NOT to repeat the escalation advice.
+        // Every branch opens with the same root-cause line — the parse
+        // failure is the operator-actionable fact regardless of what
+        // the mode chose to do about it. Only the follow-on guidance
+        // differs per resolved Action.
         lines.add("Hint:            one or more Java files in the diff failed to parse, "
                 + "so discovery ran with missing inputs.");
-        lines.add("                 Fix the parse error to recover a precise selection on "
-                + "future runs (until then the resolved action above is the safe fallback).");
+        switch (result.action()) {
+            case SELECTED -> lines.add("                 The resolved selection is "
+                    + "necessarily partial — fix the parse error to recover a precise "
+                    + "selection, or set onDiscoveryIncomplete = 'full_suite' to "
+                    + "escalate (CI and STRICT modes already do).");
+            case FULL_SUITE -> lines.add("                 Fix the parse error to "
+                    + "recover a precise selection on future runs (until then the "
+                    + "resolved action above is the safe fallback).");
+            // Reachable only via an explicit `onDiscoveryIncomplete =
+            // 'skipped'` DSL override — unusual but legal. SKIPPED is
+            // the OPPOSITE of safe here (we neither narrowed nor
+            // escalated; we just didn't run tests), so the hint must
+            // not call it "the safe fallback" the way FULL_SUITE does.
+            // We name the opt-in knob and offer the two sane exits
+            // (fix the parse error, or flip the knob to 'full_suite')
+            // without implying the current state is acceptable.
+            case SKIPPED -> lines.add("                 onDiscoveryIncomplete = "
+                    + "'skipped' meant no tests ran for this diff — fix the parse "
+                    + "error to restore coverage, or set onDiscoveryIncomplete = "
+                    + "'full_suite' if silently skipping a partial-parse diff is "
+                    + "not the intended policy.");
+        }
     }
 
     private static String formatInlineList(List<String> items) {
@@ -1487,16 +1516,20 @@ public abstract class AffectedTestTask extends DefaultTask {
         lines.add("Modules:         " + moduleGroups.size() + " " + moduleWord + ", "
                 + totalFqns + " test " + classWord + " to dispatch");
         for (Map.Entry<String, List<String>> entry : moduleGroups.entrySet()) {
+            // Contract: callers pass the key through
+            // {@link #testTaskPath(String)}, which guarantees a
+            // canonical ":module:test" / ":test" shape with a leading
+            // colon. We assert rather than silently re-normalise so
+            // any future caller that forgets the helper breaks loudly
+            // in tests instead of producing a ":x" / "x" mixed trace.
             String taskPath = entry.getKey();
             List<String> fqns = entry.getValue();
-            // A Gradle task path always starts with ':'; the dispatch
-            // helper stores plain `test` for the root project though,
-            // so normalise here to keep the explain output consistent
-            // with a Gradle-CLI-shaped task label in both cases.
-            String normalised = taskPath.startsWith(":") ? taskPath : ":" + taskPath;
+            assert taskPath.startsWith(":") : "appendModulesBlock expects testTaskPath-shaped "
+                    + "keys (leading ':'); got '" + taskPath + "' — route through "
+                    + "AffectedTestTask#testTaskPath before inserting into the map";
             int size = fqns.size();
             String rowClassWord = size == 1 ? "class" : "classes";
-            lines.add("  " + normalised + " (" + size + " test " + rowClassWord + ")");
+            lines.add("  " + taskPath + " (" + size + " test " + rowClassWord + ")");
             int preview = Math.min(size, LIFECYCLE_FQN_PREVIEW_LIMIT);
             for (int i = 0; i < preview; i++) {
                 lines.add("    " + fqns.get(i));

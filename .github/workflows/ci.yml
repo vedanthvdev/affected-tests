@@ -20,5 +20,54 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Build and test
-        run: ./gradlew check
+      # Compile once up-front so the two test stages below don't each
+      # pay for a cold classpath. Splitting test execution from
+      # compilation also makes the failure signal in the GitHub UI
+      # unambiguous — a red "Unit tests" or "E2E (Cucumber) tests"
+      # step means a test actually failed, not a compile error.
+      - name: Compile
+        run: ./gradlew classes testClasses functionalTestClasses
+
+      # Unit tests: ProjectBuilder-level coverage of the decision
+      # engine, extension wiring, --explain rendering, and locale
+      # edge cases. Cheap, fast, and the first gate adopters hit
+      # when the plugin regresses on a pure-logic change.
+      - name: Unit tests
+        run: ./gradlew :affected-tests-core:test :affected-tests-gradle:test
+
+      # E2E (Cucumber + Gradle TestKit): drives real Gradle builds
+      # through the full plugin surface that security-service and
+      # other adopters consume. Each scenario in
+      # src/functionalTest/resources/.../features runs a fresh
+      # Gradle daemon, so these tests catch build-time wiring
+      # issues (Shadow relocations, plugin-publish variants,
+      # Configuration Cache compatibility) that the unit suite
+      # cannot. Surfaced as a distinct step so a red status here
+      # points straight at the adopter-facing failure mode.
+      - name: E2E (Cucumber + Gradle TestKit) tests
+        run: ./gradlew :affected-tests-gradle:functionalTest
+
+      # Assemble the shadow JAR and exercise any remaining `check`
+      # hooks that neither test task above owns. Re-excluding test
+      # and functionalTest here keeps the step honest: if it fails,
+      # the cause is packaging, not test results.
+      - name: Full build (shadow JAR + remaining check tasks)
+        run: ./gradlew build -x test -x functionalTest
+
+      # Upload test reports on any failure above so a failing run
+      # is debuggable without rerunning with --info locally. The
+      # Cucumber HTML report in particular is the fastest way to
+      # read an e2e failure — the console log for a multi-scenario
+      # failure is dense.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            affected-tests-gradle/build/reports/tests/
+            affected-tests-gradle/build/test-results/
+            affected-tests-core/build/reports/tests/
+            affected-tests-core/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
