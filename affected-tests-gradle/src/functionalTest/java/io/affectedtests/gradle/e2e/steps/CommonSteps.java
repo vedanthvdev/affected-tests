@@ -131,18 +131,34 @@ public class CommonSteps {
                 world.project().commit("diff: update foo");
             }
             case "DISCOVERY_INCOMPLETE" -> {
-                // Malformed Java that JavaParser cannot parse. The
-                // engine reports a parse failure → DISCOVERY_INCOMPLETE.
+                // Malformed Java that JavaParser cannot parse, PAIRED
+                // with a well-formed prod/test mapping so discovery
+                // returns `DISCOVERY_INCOMPLETE + SELECTED` with a
+                // non-empty FQN set. This is the exact shape Risk C
+                // targets: the operator sees a selection succeed, but
+                // the parser silently dropped an input file so the
+                // selection is partial. Without the paired mapping
+                // the engine routes SELECTED-with-empty-FQNs to
+                // skipped=true and both the WARN and the explain
+                // hint are correctly suppressed — which would make
+                // the LOCAL-warn scenario silently untestable.
+                //
                 // Shape matters: the `broken(` below is a truncated
                 // parameter list that JavaParser treats as a hard
                 // syntax error (vs missing semicolons which it tends
                 // to recover from).
+                world.project().writeFile("src/main/java/com/example/FooService.java",
+                        "package com.example;\npublic class FooService {}\n");
+                world.project().writeFile("src/test/java/com/example/FooServiceTest.java",
+                        "package com.example;\npublic class FooServiceTest {}\n");
                 world.project().writeFile("src/main/java/com/example/Broken.java",
                         "package com.example;\npublic class Broken {\n  public void broken(\n}\n");
                 world.project().captureBaseline();
+                world.project().writeFile("src/main/java/com/example/FooService.java",
+                        "package com.example;\npublic class FooService { /* tweak */ }\n");
                 world.project().writeFile("src/main/java/com/example/Broken.java",
                         "package com.example;\npublic class Broken {\n  public void broken(\n  /* tweak */\n}\n");
-                world.project().commit("diff: update broken");
+                world.project().commit("diff: update foo + broken");
             }
             default -> throw new IllegalArgumentException(
                     "No canned setup for situation " + situation
@@ -249,6 +265,26 @@ public class CommonSteps {
         world.project().runAffectedTests();
     }
 
+    @Given("the Gradle command-line argument {string}")
+    public void theGradleCommandLineArgument(String arg) {
+        // Lets a scenario stack multiple CLI flags (e.g.
+        // `-PaffectedTestsMode=strict` and `--explain`) without
+        // inventing a per-combination `runs with "... ..."` step.
+        // Cleared automatically after the next runAffectedTests()
+        // call, so unrelated scenarios don't leak.
+        world.project().addGradleArgument(arg);
+    }
+
+    @When("the affected-tests task runs with live task dependencies")
+    public void theAffectedTestsTaskRunsWithLiveTaskDependencies() throws Exception {
+        // Exercises the real dependency graph — no `-x compileJava`
+        // CLI escape hatch — so the v2.2 "--explain does not force
+        // compile" fix is provable via the resulting task list. If
+        // the fix regresses, `:compileJava` will reappear in the
+        // executed-tasks list and the paired assertion fails.
+        world.project().runAffectedTestsWithLiveDependencies();
+    }
+
     @When("any Gradle task is configured")
     public void anyGradleTaskIsConfigured() throws Exception {
         // Scenarios that assert on configuration-time failures run
@@ -348,6 +384,25 @@ public class CommonSteps {
         assertTrue(world.project().lastOutput().contains(testFqn),
                 "Expected selected tests to include " + testFqn + ", got:\n"
                         + world.project().lastOutput());
+    }
+
+    @Then("the executed task list does not include {string}")
+    public void theExecutedTaskListDoesNotInclude(String taskPath) {
+        // TestKit's BuildResult.task() returns null when a task was
+        // never scheduled (filtered out, pruned, or its declaring
+        // subproject doesn't exist). That's exactly the "never
+        // scheduled" shape we want — a task that was scheduled and
+        // SKIPPED would still appear in the list with a SKIPPED
+        // outcome, which is a different (legitimate) behaviour we
+        // must not confuse with pruning. Fail loudly if the task
+        // was any non-null state so regressions — including the
+        // "explain quietly UP-TO-DATEs compile instead of pruning
+        // it" shape — surface as a named assertion.
+        org.gradle.testkit.runner.BuildTask task = world.project().lastBuildResult().task(taskPath);
+        assertTrue(task == null,
+                "Expected task " + taskPath + " to be absent from the executed task list, "
+                        + "but it ran with outcome " + (task == null ? "<null>" : task.getOutcome())
+                        + ". Output was:\n" + world.project().lastOutput());
     }
 
     @Then("the outcome is {string}")
