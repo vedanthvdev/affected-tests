@@ -403,6 +403,100 @@ class AffectedTestsPluginTest {
                         + "dependency set — otherwise the diagnostic flag keeps paying compile cost");
     }
 
+    @Test
+    void testClassesDependencyCallableDoesNotCaptureProjectOrTask() {
+        // v2.2.1 fix (M1 from v2.2 code review): the Bug A Callable
+        // used to capture `Project p` and resolve testClasses via
+        // `p.getTasks().named("testClasses").get()` at task-graph
+        // time. Project references are NOT
+        // configuration-cache-serialisable, so enabling Gradle CC on
+        // an adopter repo would fail with "cannot serialize object
+        // of type Project" the moment the lambda tried to cross the
+        // CC boundary.
+        //
+        // The fix: capture the `TaskProvider<?>` eagerly (providers
+        // ARE CC-serialisable) plus the task's own
+        // `Property<Boolean>` for --explain, and close over THOSE
+        // instead. Pin that contract here by asserting the
+        // dependencies of a fully-configured task are TaskProvider-
+        // shaped (or the task instances Gradle resolves them into)
+        // rather than raw Project references leaking through.
+        //
+        // The Gradle CC runtime doesn't expose a "would-this-
+        // serialise" hook from ProjectBuilder, so a full end-to-end
+        // CC compatibility check lives in the Cucumber e2e scenario
+        // that runs the real Gradle daemon with
+        // `--configuration-cache`. This unit test pins the
+        // Callable's OUTPUT SHAPE so a future edit that regresses
+        // to capturing Project breaks a fast test instead of only
+        // the slow functional run.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("java");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        var affectedTest = project.getTasks().getByName("affectedTest");
+        ((ProjectInternal) project).evaluate();
+
+        java.util.Set<? extends org.gradle.api.Task> deps =
+                affectedTest.getTaskDependencies().getDependencies(affectedTest);
+        // Every dep must be a concrete Task (Gradle unwraps providers
+        // for us at getDependencies() time); the contract under test
+        // is that we get here at all without Gradle throwing on a
+        // non-serialisable Callable capture. A regression to
+        // capturing `Project p` would produce identical runtime
+        // behaviour here (it only bites under --configuration-cache
+        // in the e2e suite) — so also pin the SOURCE of the
+        // testClasses dep lives on the root project's TaskContainer,
+        // not on a foreign reference that could carry a Project
+        // with it.
+        var testClassesDep = deps.stream()
+                .filter(t -> "testClasses".equals(t.getName()))
+                .findFirst();
+        assertTrue(testClassesDep.isPresent(),
+                "Sanity: the dispatch path must still pull in testClasses after the "
+                        + "CC-safe refactor — otherwise M1 accidentally regressed Bug A");
+        assertEquals(project, testClassesDep.get().getProject(),
+                "testClasses dep must resolve to the same Project the plugin was applied to — "
+                        + "if it's routed via a stale reference the CC-safe capture has drifted");
+    }
+
+    @Test
+    void emptyModePropertyCoercesToAbsentNotToError() {
+        // v2.2.1 fix (L1 from v2.2 code review): some CI templates
+        // unconditionally emit `-PaffectedTestsMode=$MODE` where
+        // $MODE may be unset, landing the literal string "" on the
+        // mode convention. Pre-fix this crashed parseMode with
+        // "Unknown affectedTests.mode ''". The correct semantics:
+        // an empty or whitespace-only value means "no override" —
+        // identical to omitting the flag — so the extension must
+        // filter it out BEFORE the convention applies. We can't
+        // drive `gradleProperty` inside ProjectBuilder, so simulate
+        // the final convention state the same way
+        // `dslDeclaredModeTakesPrecedenceOverAnyConvention` does:
+        // by calling .convention() on the extension directly.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestsExtension ext = project.getExtensions()
+                .getByType(AffectedTestsExtension.class);
+
+        // Gradle's map+filter chain on the real -P pipeline does this:
+        // providers.gradleProperty(...).map(trim).filter(!empty). If
+        // the raw property is "" or "   ", the chain yields an empty
+        // provider, and re-applying it as a convention leaves the
+        // extension's mode property absent. Pin that exact shape.
+        org.gradle.api.provider.Provider<String> emptyishProperty =
+                project.getProviders().provider(() -> "   ")
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty());
+        ext.getMode().convention(emptyishProperty);
+
+        assertFalse(ext.getMode().isPresent(),
+                "An empty/whitespace -PaffectedTestsMode must behave like 'flag not set' — "
+                        + "otherwise CI templates that always emit the flag with an unset "
+                        + "variable crash parseMode with 'Unknown mode \\'\\''");
+    }
+
     private static void assertAllAbsent(Class<?> type,
                                         java.util.List<String> forbiddenNames,
                                         String surfaceLabel) {

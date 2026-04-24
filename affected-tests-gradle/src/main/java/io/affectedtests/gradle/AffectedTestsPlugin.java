@@ -3,8 +3,8 @@ package io.affectedtests.gradle;
 import org.gradle.api.GradleException;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
-import org.gradle.api.Task;
 import org.gradle.api.file.Directory;
+import org.gradle.api.tasks.TaskProvider;
 
 import java.io.File;
 import java.util.LinkedHashMap;
@@ -39,8 +39,17 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         // when both the DSL and the -P are absent, no value is
         // present and the core config falls through to AUTO — same as
         // before this convention existed.
+        //
+        // Empty/whitespace-only values are coerced to absent: a CI
+        // template that always emits `-PaffectedTestsMode=$MODE` with
+        // an unset $MODE would otherwise land "" on the convention and
+        // fail parseMode with "Unknown affectedTests.mode ''". Trimming
+        // + filtering here keeps the happy path working ("no value ==
+        // no override") and the error wording targeted at actual typos.
         extension.getMode().convention(
                 project.getProviders().gradleProperty("affectedTestsMode")
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
         );
         // COMMITTED-ONLY by default: the plugin's whole job is "what
         // tests does this MR touch?", and the MR is the committed diff
@@ -113,12 +122,23 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             // class file, so forcing a compile turns a 3-second
             // diagnostic into a multi-minute full compile. The
             // dispatch path still picks them up as before.
+            //
+            // CC-safe capture: we resolve the {@code TaskProvider<?>}
+            // for each subproject's {@code testClasses} task eagerly
+            // (providers are configuration-cache-serialisable) and
+            // close the Callable over that Provider plus the task's
+            // own {@code Property<Boolean>}. We deliberately do NOT
+            // capture {@code Project p} or {@code task} — either would
+            // make the lambda unserialisable when an adopter enables
+            // {@code org.gradle.configuration-cache=true}.
+            var explainFlag = task.getExplain();
             rootProject.allprojects(p -> p.getPluginManager().withPlugin("java", unused -> {
-                Callable<List<Task>> testClassesWhenDispatching = () -> {
-                    if (Boolean.TRUE.equals(task.getExplain().getOrElse(false))) {
+                TaskProvider<?> testClasses = p.getTasks().named("testClasses");
+                Callable<List<TaskProvider<?>>> testClassesWhenDispatching = () -> {
+                    if (Boolean.TRUE.equals(explainFlag.getOrElse(false))) {
                         return List.of();
                     }
-                    return List.of(p.getTasks().named("testClasses").get());
+                    return List.of(testClasses);
                 };
                 task.dependsOn(testClassesWhenDispatching);
             }));

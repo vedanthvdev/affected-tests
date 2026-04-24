@@ -313,6 +313,19 @@ public class CommonSteps {
                 "Failure must come from configuration / evaluation phase, got:\n" + world.project().lastOutput());
     }
 
+    @Then("the task fails")
+    public void theTaskFails() {
+        // Generic failure assertion for scenarios where the failure
+        // phase is uninteresting — e.g. an unknown `-P` value that
+        // escapes the extension convention and is only rejected at
+        // task-action time via {@code parseMode}. Asserting on the
+        // lifecycle phase would tie the test to an implementation
+        // detail (exactly where the enum lookup fires), so this
+        // step only pins "the build did not turn green".
+        assertTrue(world.project().lastBuildFailed(),
+                "Expected a failing build, got green:\n" + world.project().lastOutput());
+    }
+
     @Then("the situation is {word}")
     public void theSituationIs(String situation) {
         // The --explain trace prints the ACTUAL situation on the

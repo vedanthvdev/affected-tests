@@ -676,6 +676,50 @@ class AffectedTestTaskExplainFormatTest {
     }
 
     @Test
+    void discoveryIncompleteHintOnSkippedNamesTheOptInAndOffersAnEscape() {
+        // v2.2.1 fix (M3 from v2.2 code review): when the operator
+        // has explicitly set `onDiscoveryIncomplete = 'skipped'`, the
+        // plugin runs zero tests on a partial-parse diff. The v2.2
+        // hint lumped SKIPPED into the FULL_SUITE branch and printed
+        // "the resolved action above is the safe fallback" — which
+        // is precisely wrong: SKIPPED is the OPPOSITE of safe here
+        // (neither selection narrowed nor suite escalated). Pin the
+        // corrected wording: the hint names the opt-in knob, names
+        // the parse failure, and points at `'full_suite'` as the
+        // fix — without ever calling the skip "safe".
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"), Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, true, // runAll=false, skipped=true
+                Situation.DISCOVERY_INCOMPLETE, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("failed to parse"),
+                "SKIPPED hint must still name the parse-failure cause — the opt-in "
+                        + "doesn't change why discovery was incomplete. Got:\n" + trace);
+        assertTrue(trace.contains("onDiscoveryIncomplete = 'skipped'"),
+                "Hint must name the exact knob the operator set so a second reader of "
+                        + "the trace can locate the override. Got:\n" + trace);
+        assertTrue(trace.contains("onDiscoveryIncomplete = 'full_suite'"),
+                "Hint must offer 'full_suite' as the escape hatch — SKIPPED is the only "
+                        + "branch where escalation advice is not circular. Got:\n" + trace);
+        assertFalse(trace.contains("safe fallback"),
+                "SKIPPED ran no tests — calling that the 'safe fallback' directly "
+                        + "contradicts the correctness posture the plugin is supposed to "
+                        + "defend. Got:\n" + trace);
+        assertFalse(trace.contains("selection is necessarily partial"),
+                "Nothing was selected — the partial-selection wording belongs to the "
+                        + "SELECTED branch only. Got:\n" + trace);
+    }
+
+    @Test
     void discoverySuccessHintKeepsV2dot1OutOfScopeMisconfigWording() {
         // Regression: v2.2's hint refactor must preserve the single
         // DISCOVERY_SUCCESS case v2.1 actually diagnosed correctly —
@@ -820,6 +864,58 @@ class AffectedTestTaskExplainFormatTest {
         assertTrue(trace.contains(":test (1 test class)"),
                 "Root-project task must render as ':test' in the explain trace so every row "
                         + "reads as a Gradle task path. Got:\n" + trace);
+    }
+
+    @Test
+    void modulesBlockRejectsKeysThatSkipTheTestTaskPathHelper() {
+        // v2.2.1 fix (L2 from v2.2 code review): appendModulesBlock
+        // used to silently re-normalise keys missing a leading colon,
+        // masking bugs where a future caller forgot to route through
+        // testTaskPath(). The renderer now asserts the contract so
+        // the failure surface moves into tests instead of into a
+        // split operator trace (":api:test" next to "core:test").
+        //
+        // Asserted with `assert`, so this test only trips when
+        // assertions are on — which is how every Gradle test JVM is
+        // configured. Pins both the positive signal (helper output
+        // flows through) and the negative (raw module path does not).
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        // A key without a leading colon violates the helper contract.
+        // Canonical Java idiom: the assign-inside-assert executes
+        // only when assertions are enabled, so the flag stays false
+        // on a JVM running with `-da` and we skip the negative half.
+        // Gradle's test JVM runs with assertions on by default.
+        boolean assertionsOn = false;
+        assert assertionsOn = true;
+        if (!assertionsOn) {
+            return;
+        }
+
+        Map<String, List<String>> bad = Map.of("api:test",
+                List.of("com.example.FooTest"));
+        try {
+            AffectedTestTask.renderExplainTrace(config, result, bad);
+            throw new IllegalStateException("appendModulesBlock must reject keys missing "
+                    + "the leading colon so a future caller that forgets testTaskPath() "
+                    + "fails loudly instead of silently emitting split traces");
+        } catch (AssertionError expected) {
+            assertTrue(expected.getMessage() != null
+                            && expected.getMessage().contains("testTaskPath"),
+                    "Assertion message must name the helper so the fix is obvious. Got: "
+                            + expected.getMessage());
+        }
     }
 
     @Test

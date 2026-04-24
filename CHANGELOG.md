@@ -4,14 +4,137 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [v2.2.1] — code-review follow-ups after the v2.2 ship
+
+v2.2.1 is a **non-breaking patch** that closes the Medium + Low
+findings a structured code review raised against the v2.2
+changeset. None of them were adopter-reported regressions — v2.2 is
+green end-to-end on the `security-service` pilot — but each one
+represents a real failure mode for a second adopter who doesn't
+ship in exactly the same posture. Point-releasing them now keeps
+the v2.3 tech-plan window open for the larger feature work
+(non-conventional test task names, explain-trace truncation
+unification) without delaying these fixes behind it.
+
+If you're on v2.2.0 today you can bump to v2.2.1 without touching
+`build.gradle`. The only observable change on a green path is that
+enabling `org.gradle.configuration-cache` now works. The only
+observable changes on the unhappy path are sharper error messages
+and a new hint branch for the `onDiscoveryIncomplete = 'skipped'`
+opt-in.
+
+### Fixed — `org.gradle.configuration-cache` no longer crashes the plugin (M1)
+
+The v2.2 dispatch-dependency Callable closed over a `Project`
+reference to resolve each subproject's `testClasses` task. `Project`
+is explicitly documented as **not** configuration-cache-serialisable,
+so a repo with `org.gradle.configuration-cache=true` in
+`gradle.properties` would fail to serialise the task graph with:
+
+```
+Task `:affectedTest` of type `...AffectedTestTask`: cannot serialize
+object of type Project
+```
+
+The fix resolves each subproject's `testClasses` task once, eagerly,
+into a `TaskProvider<?>` (which IS CC-serialisable) and closes the
+Callable over that plus the task's own `Property<Boolean>` for the
+`--explain` gate. Cache-hit rate and task-graph shape are identical
+to v2.2 — only the serialisation surface changed. A new functional
+scenario runs `./gradlew affectedTest --configuration-cache
+--explain` on a SELECTED-shaped diff and pins "Configuration cache
+entry …" in the output so the next edit that accidentally re-captures
+`Project` breaks a test instead of only an adopter's CI.
+
+Adopters who don't enable CC see no change.
+
+### Fixed — `Action.SKIPPED` hint no longer calls the skip "safe" (M3)
+
+v2.2's `DISCOVERY_INCOMPLETE` hint was a two-way branch: SELECTED
+warned about the partial-selection risk; everything else printed "the
+resolved action above is the safe fallback". That "everything else"
+bucket silently absorbed `Action.SKIPPED` — which an operator can
+opt into explicitly via `onDiscoveryIncomplete = 'skipped'`. Calling
+SKIPPED "safe" is precisely inverted advice: the run executed zero
+tests on a partial-parse diff.
+
+v2.2.1 gives SKIPPED its own hint branch:
+
+```
+Hint:            one or more Java files in the diff failed to parse,
+                 so discovery ran with missing inputs.
+                 onDiscoveryIncomplete = 'skipped' meant no tests ran
+                 for this diff — fix the parse error to restore
+                 coverage, or set onDiscoveryIncomplete = 'full_suite'
+                 if silently skipping a partial-parse diff is not the
+                 intended policy.
+```
+
+The hint names the exact knob that was set (so a second reader of the
+trace can locate the override) and names the escape (`'full_suite'`)
+without ever calling the current state "safe". SELECTED and
+FULL_SUITE wording are unchanged.
+
+### Fixed — `-PaffectedTestsMode=` (empty) no longer crashes (L1)
+
+CI templates that unconditionally emit `-PaffectedTestsMode=$MODE`
+with an unset `$MODE` passed the literal empty string into the
+extension's convention, and v2.2 rejected it with
+`Unknown affectedTests.mode ''`. v2.2.1 filters empty/whitespace in
+the convention chain so the empty case is identical to omitting the
+flag — the AUTO default keeps working, and the "unknown mode" error
+stays reserved for actual typos.
+
+### Fixed — unknown-mode error names the AUTO fallback (L4)
+
+v2.2's `parseMode` error listed the four legal values only, which
+led adopters to ask "so which one is the default?". v2.2.1 adds the
+AUTO-fallback hint plus the `CI=true` tripwire that AUTO keys off:
+
+```
+Unknown affectedTests.mode 'xyzzy'. Expected one of: auto, local,
+ci, strict (omit the value or leave -PaffectedTestsMode unset to
+keep the AUTO default, which picks CI when CI=true is exported).
+```
+
+### Changed — explain-trace module-block contract now fails loudly on misuse (L2)
+
+`AffectedTestTask#appendModulesBlock` used to silently re-normalise
+map keys that were missing a leading colon, papering over any caller
+that forgot to route their module paths through
+`AffectedTestTask#testTaskPath`. A future edit that fed raw
+`"api:test"` strings into the map produced a split trace (`":api:test"`
+next to `"core:test"`). The helper now asserts the contract up-front,
+so the failure surface moves into the test suite.
+
+The assertion is plain `assert`, active on every Gradle test JVM by
+default and a no-op on production runs — the public operator-facing
+trace output is unchanged.
+
+_Changelog housekeeping: the v2.2.0 section below has been backfilled
+with items that were in the v2.2.0 ship but were still sitting under
+`[Unreleased]` in the CHANGELOG when the tag was cut._
+
+## [v2.2.0] — adoption-feedback polish from the security-service pilot
+
+v2.2.0 is a **non-breaking** release driven entirely by what a second
+real-world adopter (Modulr's `security-service`, CAR-5190) ran into
+while plugging v2.1 in. Every DSL knob, every default, and every
+resolved behaviour from v2.1 keeps working bit-for-bit; v2.2 only
+sharpens the edges an operator touches when something goes wrong
+or when they want to A/B a mode from CI.
+
+If you're on v2.1 today you can bump to v2.2 without touching
+`build.gradle`. The only observable difference on a green path is a
+faster `--explain` run (Bug A) and a per-module breakdown in that
+trace (Polish E). The only observable difference on the unhappy path
+is clearer hint wording (Bug B) and — in LOCAL mode specifically — a
+loud `WARN` when discovery can't parse part of the diff (Risk C).
 
 ### Changed — internal refinements from the v2.2 code review
 
-Follow-up polish on the v2.2 adoption-feedback release, all
-non-breaking and none of them visible in build scripts. Captured here
-rather than cut as a point release because the operator-facing
-contract is identical to v2.2.0 on every green path.
+Follow-up polish on the v2.2 adoption-feedback changeset, all
+non-breaking and none of them visible in build scripts.
 
 * **Risk C WARN no longer fires with "0 test classes".** The engine
   rewrites `SELECTED` with nothing to dispatch into `skipped=true`;
@@ -44,22 +167,6 @@ contract is identical to v2.2.0 on every green path.
   `compileJava` / `compileTestJava` on every subproject, not just the
   root — catches a regression where someone pins the Callable wiring
   to the root project instead of iterating via `allprojects { ... }`.
-
-## [v2.2.0] — adoption-feedback polish from the security-service pilot
-
-v2.2.0 is a **non-breaking** release driven entirely by what a second
-real-world adopter (Modulr's `security-service`, CAR-5190) ran into
-while plugging v2.1 in. Every DSL knob, every default, and every
-resolved behaviour from v2.1 keeps working bit-for-bit; v2.2 only
-sharpens the edges an operator touches when something goes wrong
-or when they want to A/B a mode from CI.
-
-If you're on v2.1 today you can bump to v2.2 without touching
-`build.gradle`. The only observable difference on a green path is a
-faster `--explain` run (Bug A) and a per-module breakdown in that
-trace (Polish E). The only observable difference on the unhappy path
-is clearer hint wording (Bug B) and — in LOCAL mode specifically — a
-loud `WARN` when discovery can't parse part of the diff (Risk C).
 
 ### Fixed — `--explain` no longer forces a full compile (Bug A)
 
