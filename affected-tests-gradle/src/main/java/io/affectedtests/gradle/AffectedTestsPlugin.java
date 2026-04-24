@@ -3,12 +3,14 @@ package io.affectedtests.gradle;
 import org.gradle.api.GradleException;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
+import org.gradle.api.Task;
 import org.gradle.api.file.Directory;
 
 import java.io.File;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 /**
  * Gradle plugin that registers the {@code affectedTest} task and the
@@ -26,6 +28,19 @@ public class AffectedTestsPlugin implements Plugin<Project> {
         extension.getBaseRef().convention(
                 project.getProviders().gradleProperty("affectedTestsBaseRef")
                         .orElse("origin/master")
+        );
+        // Mirror the baseRef pattern: let callers flip mode from the
+        // command line via `-PaffectedTestsMode=local|ci|strict|auto`
+        // without editing build.gradle. Useful for adoption experiments
+        // ("what would STRICT mode pick on today's HEAD?") and for CI
+        // jobs that want to A/B two modes from the same pipeline.
+        // DSL-declared `mode = '...'` still wins because Gradle's
+        // Property resolution applies explicit sets before conventions;
+        // when both the DSL and the -P are absent, no value is
+        // present and the core config falls through to AUTO — same as
+        // before this convention existed.
+        extension.getMode().convention(
+                project.getProviders().gradleProperty("affectedTestsMode")
         );
         // COMMITTED-ONLY by default: the plugin's whole job is "what
         // tests does this MR touch?", and the MR is the committed diff
@@ -83,11 +98,30 @@ public class AffectedTestsPlugin implements Plugin<Project> {
             task.getRootDir().set(rootDir);
             task.getSubprojectPaths().set(project.provider(() -> collectSubprojectPaths(rootProject)));
 
-            // Ensure test classes are compiled before the nested gradle invocation
-            // runs. Without this, a fresh CI checkout would have nothing to test
-            // and Gradle would fail with "No tests found for given includes".
-            rootProject.allprojects(p -> p.getPluginManager().withPlugin("java", unused ->
-                    task.dependsOn(p.getTasks().named("testClasses"))));
+            // Ensure test classes are compiled before the nested gradle
+            // invocation runs. Without this, a fresh CI checkout would
+            // have nothing to test and Gradle would fail with "No tests
+            // found for given includes".
+            //
+            // Wrapped in a {@link Callable} so the dependency is
+            // materialised at task-graph calculation time, which is
+            // after Gradle has parsed {@code --explain} into
+            // {@link AffectedTestTask#getExplain()}. When the operator
+            // asked for the decision trace we skip every
+            // {@code testClasses} dependency — {@code --explain}
+            // short-circuits before dispatch and never consumes a
+            // class file, so forcing a compile turns a 3-second
+            // diagnostic into a multi-minute full compile. The
+            // dispatch path still picks them up as before.
+            rootProject.allprojects(p -> p.getPluginManager().withPlugin("java", unused -> {
+                Callable<List<Task>> testClassesWhenDispatching = () -> {
+                    if (Boolean.TRUE.equals(task.getExplain().getOrElse(false))) {
+                        return List.of();
+                    }
+                    return List.of(p.getTasks().named("testClasses").get());
+                };
+                task.dependsOn(testClassesWhenDispatching);
+            }));
         });
 
         // Validate scalar-range constraints at configuration completion so

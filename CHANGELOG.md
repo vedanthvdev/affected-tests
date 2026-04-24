@@ -6,6 +6,167 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — internal refinements from the v2.2 code review
+
+Follow-up polish on the v2.2 adoption-feedback release, all
+non-breaking and none of them visible in build scripts. Captured here
+rather than cut as a point release because the operator-facing
+contract is identical to v2.2.0 on every green path.
+
+* **Risk C WARN no longer fires with "0 test classes".** The engine
+  rewrites `SELECTED` with nothing to dispatch into `skipped=true`;
+  the WARN now short-circuits on `result.skipped() || FQNs.isEmpty()`
+  so an operator never sees "LOCAL mode accepted a partial selection
+  of 0 test classes" immediately followed by a skipped run.
+* **Risk C WARN wording is de-duplicated against the engine log.**
+  The message no longer restates "could not parse one or more Java
+  files" (the engine's own WARN a few lines up already says so) and
+  instead cross-references it — keeps the mode-specific postscript
+  without echoing the parse-failure fact twice.
+* **`DISCOVERY_INCOMPLETE` hint is now action-aware.** `Action.SELECTED`
+  continues to say "selection is necessarily partial — set
+  `onDiscoveryIncomplete = 'full_suite'` to escalate". On
+  `Action.FULL_SUITE` (CI/STRICT default, or an explicit operator
+  override) the hint drops the partial-selection wording entirely and
+  only names the parse failure for next-run follow-up — avoids the
+  circular "escalate to the action we already took" advice.
+* **Shared `testTaskPath` helper.** Both the `--explain` Modules-block
+  preview and the dispatch-path argv now route through
+  `AffectedTestTask#testTaskPath`, so the two operator-facing strings
+  can no longer drift. Root project is `":test"` with a leading colon
+  on both sides.
+* **Unit tests for the Risk C WARN gate.** The four-way gate (mode,
+  situation, action, skipped/empty) is now pinned by six direct unit
+  tests on the pure `shouldWarnLocalDiscoveryIncomplete` /
+  `formatLocalDiscoveryIncompleteWarning` helpers, matching what the
+  Javadoc already promised.
+* **Two-module Bug A e2e scenario.** Pins that `--explain` prunes
+  `compileJava` / `compileTestJava` on every subproject, not just the
+  root — catches a regression where someone pins the Callable wiring
+  to the root project instead of iterating via `allprojects { ... }`.
+
+## [v2.2.0] — adoption-feedback polish from the security-service pilot
+
+v2.2.0 is a **non-breaking** release driven entirely by what a second
+real-world adopter (Modulr's `security-service`, CAR-5190) ran into
+while plugging v2.1 in. Every DSL knob, every default, and every
+resolved behaviour from v2.1 keeps working bit-for-bit; v2.2 only
+sharpens the edges an operator touches when something goes wrong
+or when they want to A/B a mode from CI.
+
+If you're on v2.1 today you can bump to v2.2 without touching
+`build.gradle`. The only observable difference on a green path is a
+faster `--explain` run (Bug A) and a per-module breakdown in that
+trace (Polish E). The only observable difference on the unhappy path
+is clearer hint wording (Bug B) and — in LOCAL mode specifically — a
+loud `WARN` when discovery can't parse part of the diff (Risk C).
+
+### Fixed — `--explain` no longer forces a full compile (Bug A)
+
+Pre-v2.2 the `affectedTest` task eagerly depended on `testClasses` in
+every subproject applying the `java` plugin. Great for the dispatch
+path — the nested `./gradlew` needs class files to actually run tests
+against — but pure overhead when the operator just wants to see the
+decision trace. On a security-service-shaped repo this turned a
+3-second diagnostic run into a multi-minute compile.
+
+v2.2 wires the dependency through a Gradle `Callable` that re-evaluates
+after command-line parsing. When `--explain` is set the Callable
+returns an empty list and `testClasses` is pruned from the task graph
+entirely; when `--explain` is absent the dependency behaves exactly
+as before. The fix is transparent to build scripts and is pinned by
+both a unit test on the Callable return shape and a Cucumber e2e
+scenario that asserts `:compileJava` is absent from the executed-task
+list of a real `--explain` run.
+
+### Fixed — situation-specific Hint lines in the `--explain` trace (Bug B)
+
+Pre-v2.2 the `--explain` trace printed a single "Hint:" line regardless
+of the resolved situation, and that hint always named
+`outOfScopeTestDirs` / `outOfScopeSourceDirs`. Correct for a subset of
+DISCOVERY_SUCCESS runs, actively misleading everywhere else — a
+DISCOVERY_EMPTY run with no OOS configured, and a DISCOVERY_INCOMPLETE
+run where the real risk is a parse failure, both got the same OOS
+advice that had nothing to do with the actual cause.
+
+v2.2 splits that one line into three targeted branches:
+
+- **DISCOVERY_EMPTY** now leads with "discovery mapped 0 test classes"
+  and lists the three realistic causes — wrong `testSuffixes`,
+  `testDirs` misconfigured, or no test coverage yet.
+- **DISCOVERY_INCOMPLETE** now names the actual risk: the mapper
+  couldn't parse one or more Java files in the diff, so the selection
+  is definitionally partial. It also points at
+  `onDiscoveryIncomplete = "full_suite"` as the escalation knob.
+- **DISCOVERY_SUCCESS** with `outOfScopeTestDirs` /
+  `outOfScopeSourceDirs` configured-but-unmatched keeps the v2.1 OOS
+  advice — that was the one situation where the old hint was right.
+
+### Added — loud WARN when LOCAL mode accepts a partial selection (Risk C)
+
+LOCAL mode defaults `onDiscoveryIncomplete = SELECTED` on purpose —
+developers iterating on WIP want fast feedback. The adoption risk:
+when a Java parse failure drops files silently, the green "SELECTED"
+summary overstates what actually ran, and there was no way to tell
+from the non-`--explain` output that the selection was incomplete.
+
+v2.2 emits a lifecycle-level `WARN` in this exact combination
+(`mode = LOCAL` + `DISCOVERY_INCOMPLETE` + `Action = SELECTED`) before
+the dispatch fires. The marker string
+`affectedTest: LOCAL mode accepted a partial selection` is grep-friendly
+and visible at Gradle's default log level — operators don't need to
+re-run with `--info` to see the safety signal. CI and STRICT modes
+already escalate to FULL_SUITE on DISCOVERY_INCOMPLETE by default, so
+the warning is mode-gated and does not fire there.
+
+### Added — `-PaffectedTestsMode` runtime override (Feature D)
+
+v2.2 mirrors the existing `-PaffectedTestsBaseRef` pattern: set
+`-PaffectedTestsMode=local|ci|strict|auto` on the command line to flip
+the plugin's mode without editing `build.gradle`. Useful for adoption
+experiments ("what would STRICT mode pick on today's HEAD?") and for
+CI jobs that want to A/B two modes from the same pipeline.
+
+DSL-declared `mode = '...'` still wins because Gradle Property
+semantics apply explicit `set()` calls ahead of `convention()` — so
+the `-P` is genuinely a fallback, not an override, and a repo pinning
+its CI mode in `build.gradle` keeps that pin even if a stray `-P`
+slips past review.
+
+### Added — `:module:test` dispatch breakdown in `--explain` (Polish E)
+
+The pre-v2.2 `--explain` trace named the total test-class count on a
+SELECTED run but not the module distribution, so an operator asking
+"which tasks will Gradle actually kick off?" still had to dry-run a
+real dispatch to answer that. v2.2 threads the same grouping the
+dispatch path uses into the trace:
+
+```
+Modules:         2 modules, 3 test classes to dispatch
+  :application:test (2 test classes)
+    com.example.FooTest
+    com.example.BarTest
+  :api:test (1 test class)
+    com.example.BazTest
+```
+
+Non-SELECTED runs (EMPTY_DIFF, docs-only, etc.) suppress the block
+entirely rather than print a noisy "Modules: 0 modules" line.
+
+### Verified — regression coverage
+
+- New unit tests in `AffectedTestsPluginTest` pin the `--explain`
+  Callable's prune behaviour (present without `--explain`, absent with
+  it) and the mode-precedence contract (DSL beats convention).
+- New unit tests in `AffectedTestTaskExplainFormatTest` pin the three
+  situation-specific hint variants and the empty-map / multi-module /
+  root-project / preview-truncation shapes of the Modules block.
+- A new Cucumber feature
+  (`06-v2.2-adoption-feedback.feature`) pins every user-facing
+  behaviour above as a full TestKit e2e, so a regression on any of
+  the five fixes surfaces as a scenario failure rather than silent
+  drift in operator experience.
+
 ## [v2.1.0] — DSL polish on top of the v2 breaking release
 
 v2.1.0 is the **first publicly tagged v2 release**. It bundles everything
@@ -927,5 +1088,7 @@ broad strokes:
   safety hardening, multi-module scanning, axion-release versioning. See the
   Releases page for detail.
 
-[Unreleased]: https://github.com/vedanthvdev/affected-tests/compare/v1.9.12...HEAD
+[Unreleased]: https://github.com/vedanthvdev/affected-tests/compare/v2.2.0...HEAD
+[v2.2.0]: https://github.com/vedanthvdev/affected-tests/releases/tag/v2.2.0
+[v2.1.0]: https://github.com/vedanthvdev/affected-tests/releases/tag/v2.1.0
 [1.9.12]: https://github.com/vedanthvdev/affected-tests/releases/tag/v1.9.12

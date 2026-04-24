@@ -252,13 +252,34 @@ public final class TestProject {
      * regression.
      */
     public void runAffectedTests() {
+        runAffectedTests(true);
+    }
+
+    /**
+     * Runs {@code affectedTest} without the {@code -x compileJava -x
+     * compileTestJava ...} safety net so the real task-graph
+     * dependency shape is exercised. Used by the v2.2 e2e scenario
+     * that pins the "--explain must not force a compile" fix: with
+     * the skip-flags present we'd short-circuit compile via CLI
+     * regardless of the plugin's dependency wiring, which would mask
+     * a regression in the fix. Every other scenario should stick
+     * with {@link #runAffectedTests()} so per-scenario wall time
+     * stays in the seconds-range.
+     */
+    public void runAffectedTestsWithLiveDependencies() {
+        runAffectedTests(false);
+    }
+
+    private void runAffectedTests(boolean skipCompileTasks) {
         List<String> args = new ArrayList<>();
         args.add("affectedTest");
         args.add("--stacktrace");
-        args.add("-x"); args.add("compileJava");
-        args.add("-x"); args.add("compileTestJava");
-        args.add("-x"); args.add("processResources");
-        args.add("-x"); args.add("processTestResources");
+        if (skipCompileTasks) {
+            args.add("-x"); args.add("compileJava");
+            args.add("-x"); args.add("compileTestJava");
+            args.add("-x"); args.add("processResources");
+            args.add("-x"); args.add("processTestResources");
+        }
         if (baselineCommit != null) {
             // Pass baseRef as a Gradle property instead of baking it
             // into build.gradle. See captureBaseline() for the full

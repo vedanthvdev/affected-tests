@@ -321,6 +321,20 @@ public abstract class AffectedTestTask extends DefaultTask {
         AffectedTestsEngine engine = new AffectedTestsEngine(config, projectDir);
         AffectedTestsResult result = engine.run();
 
+        // Loud warning before the explain/dispatch fork: LOCAL-mode's
+        // default on DISCOVERY_INCOMPLETE is SELECTED, which silently
+        // accepts a partial selection when the discovery parser hit an
+        // unparseable Java file. On a workstation that's a conscious
+        // trade-off (dev iterates on WIP tests, wants fast feedback),
+        // but unless the operator knows about it, a green "SELECTED N
+        // tests" summary reads as "we ran the affected tests" — not
+        // as "we ran what the parser could see, which may not be all
+        // of them". We emit WARN so it's visible in both the IDE and
+        // CI logs without extra flags, and we do it on the --explain
+        // path too so the diagnostic mode surfaces the same risk the
+        // dispatch mode does.
+        warnIfLocalDiscoveryIncompleteSelected(config, result);
+
         boolean explain = getExplain().getOrElse(false);
         if (explain) {
             // {@code --explain} is a diagnostic mode: we print the trace and
@@ -328,7 +342,34 @@ public abstract class AffectedTestTask extends DefaultTask {
             // as many times as they need without waiting for the suite.
             // Every line goes through {@code lifecycle()} so the trace is
             // visible by default (no {@code --info} gymnastics).
-            for (String line : renderExplainTrace(config, result)) {
+            //
+            // Compute the module grouping here (not inside
+            // renderExplainTrace) because the grouping needs
+            // instance-level state — {@link #getSubprojectPaths()} and
+            // the {@code projectDir} Path — which the pure-function
+            // renderer deliberately doesn't see. Empty map when
+            // there's no selection to split by module, so the renderer
+            // can simply skip the "Modules:" block rather than print
+            // an empty one.
+            Map<String, List<String>> moduleGroupsForExplain = Map.of();
+            if (result.action() == Action.SELECTED && !result.testClassFqns().isEmpty()) {
+                // groupFqnsByModule returns keys shaped like the
+                // owning project path (``, `:api`, `:application`).
+                // The dispatch path then appends `:test` to produce
+                // the real `:module:test` task path before invoking
+                // the nested gradle. Mirror that transformation here
+                // so the --explain preview names the EXACT tasks
+                // that would run in a non-explain dispatch — anything
+                // less defeats the point of the diagnostic.
+                Map<String, List<String>> rawGroups = groupFqnsByModule(
+                        projectDir, result.testClassFqns(), result.testFqnToPath());
+                Map<String, List<String>> taskKeyed = new LinkedHashMap<>(rawGroups.size());
+                for (Map.Entry<String, List<String>> e : rawGroups.entrySet()) {
+                    taskKeyed.put(testTaskPath(e.getKey()), e.getValue());
+                }
+                moduleGroupsForExplain = taskKeyed;
+            }
+            for (String line : renderExplainTrace(config, result, moduleGroupsForExplain)) {
                 getLogger().lifecycle(line);
             }
             return;
@@ -491,8 +532,7 @@ public abstract class AffectedTestTask extends DefaultTask {
             Map<String, List<String>> validatedGroups = new LinkedHashMap<>(grouped.size());
             int totalValid = 0;
             for (Map.Entry<String, List<String>> entry : grouped.entrySet()) {
-                String modulePath = entry.getKey();
-                String taskPath = modulePath.isEmpty() ? "test" : modulePath + ":test";
+                String taskPath = testTaskPath(entry.getKey());
                 List<String> valid = new ArrayList<>(entry.getValue().size());
                 for (String fqn : entry.getValue()) {
                     if (!isValidFqn(fqn)) {
@@ -788,6 +828,25 @@ public abstract class AffectedTestTask extends DefaultTask {
     }
 
     /**
+     * Converts a Gradle project path (as returned by
+     * {@link #groupFqnsByModule}) into the test task path used for
+     * both dispatch argv and the {@code --explain} Modules-block
+     * preview. Package-private so the unit tests can pin the root /
+     * subproject shapes directly, and shared between the two sites
+     * so the two lines of output an operator diffs
+     * (explain preview vs dispatch log) cannot drift out of sync.
+     *
+     * <p>Empty key (= root project) resolves to {@code :test} with a
+     * leading colon. The nested Gradle invocation accepts both
+     * {@code test} and {@code :test} for the root case, so this
+     * normalisation is cosmetic on the dispatch side but keeps the
+     * preview unambiguous.
+     */
+    static String testTaskPath(String modulePath) {
+        return modulePath.isEmpty() ? ":test" : modulePath + ":test";
+    }
+
+    /**
      * Groups discovered test FQNs by the Gradle path of the subproject that
      * owns each test file. Tests under the root project fall under the
      * empty-string key and get dispatched to the root {@code test} task.
@@ -933,6 +992,96 @@ public abstract class AffectedTestTask extends DefaultTask {
         }
     }
 
+    /** Marker substring used by both the emission and the tests to pin the WARN. */
+    static final String LOCAL_DISCOVERY_INCOMPLETE_WARNING_MARKER =
+            "affectedTest: LOCAL mode accepted a partial selection";
+
+    /**
+     * Emits a lifecycle-level WARN when the resolved run is a LOCAL-mode
+     * {@link Situation#DISCOVERY_INCOMPLETE} + {@link Action#SELECTED}
+     * combination — i.e. the workstation default that silently trusts
+     * a partial discovery set after the Java parser dropped one or
+     * more files. Deliberately WARN (not INFO): Gradle renders WARN in
+     * the default log level, so operators don't need to opt in via
+     * {@code --info} to see the risk.
+     *
+     * <p>Called before the {@code --explain} / dispatch fork so both
+     * paths surface the same concern: a diagnostic run reading the
+     * same partial selection that a non-diagnostic run would actually
+     * dispatch must raise the same alarm. Fires at most once per
+     * task execution — there is only one resolved situation per run.
+     *
+     * <p>The gate logic lives in the pure {@link #shouldWarnLocalDiscoveryIncomplete}
+     * and message formatting in {@link #formatLocalDiscoveryIncompleteWarning};
+     * this instance method only pipes the result through the task's
+     * Gradle logger. Unit tests exercise the pure pair directly so
+     * the four-way gate (mode, situation, action, skipped/empty) is
+     * locked in without a log-capture fixture.
+     */
+    void warnIfLocalDiscoveryIncompleteSelected(AffectedTestsConfig config,
+                                                AffectedTestsResult result) {
+        if (!shouldWarnLocalDiscoveryIncomplete(config, result)) {
+            return;
+        }
+        // Intentionally does NOT restate the parse-failure fact — the
+        // engine's own WARN (rendered a few lines above, with file-level
+        // detail) already did that. This line's job is the mode-specific
+        // postscript the engine can't emit (it doesn't know the mode):
+        // LOCAL chose to honour a partial selection, here's how to
+        // escalate if you'd rather not.
+        getLogger().warn(formatLocalDiscoveryIncompleteWarning(result.testClassFqns().size()));
+    }
+
+    /**
+     * Pure gate for {@link #warnIfLocalDiscoveryIncompleteSelected}.
+     * Returns {@code true} iff the WARN should fire. Package-private
+     * for direct unit-test coverage of each guard:
+     * <ul>
+     *   <li>Non-LOCAL modes never warn (CI / STRICT escalate, no
+     *       under-testing risk).</li>
+     *   <li>Only DISCOVERY_INCOMPLETE ever warns (parse failure is
+     *       the only "selection was quietly partial" shape).</li>
+     *   <li>Only SELECTED ever warns (FULL_SUITE / SKIPPED either
+     *       already escalated or already bailed, so there is no
+     *       silent partial selection to surface).</li>
+     *   <li>Skipped results or empty FQN lists short-circuit — the
+     *       engine rewrites "SELECTED with nothing to select" into
+     *       {@code skipped=true}, and a zero-count WARN immediately
+     *       before the task bails would contradict itself.</li>
+     * </ul>
+     */
+    static boolean shouldWarnLocalDiscoveryIncomplete(AffectedTestsConfig config,
+                                                      AffectedTestsResult result) {
+        if (config.effectiveMode() != Mode.LOCAL) {
+            return false;
+        }
+        if (result.situation() != Situation.DISCOVERY_INCOMPLETE) {
+            return false;
+        }
+        if (result.action() != Action.SELECTED) {
+            return false;
+        }
+        if (result.skipped() || result.testClassFqns().isEmpty()) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Formats the Risk C WARN line. Package-private so tests can pin
+     * both the stable marker substring (for grep-based alerting
+     * assertions) and the singular/plural "test class"/"test classes"
+     * toggle on the FQN count without reaching into a log capture.
+     */
+    static String formatLocalDiscoveryIncompleteWarning(int selectedCount) {
+        String classWord = selectedCount == 1 ? "test class" : "test classes";
+        return LOCAL_DISCOVERY_INCOMPLETE_WARNING_MARKER + " of " + selectedCount
+                + " " + classWord + " — see the discovery WARN above for the files "
+                + "that failed to parse. Fix the parse error to recover a precise "
+                + "selection, or set onDiscoveryIncomplete = 'full_suite' to escalate "
+                + "(CI and STRICT already do).";
+    }
+
     /**
      * Renders an {@link EscalationReason} as a short human-readable phrase
      * suitable for a lifecycle log line. Package-private so the log-shape
@@ -1034,8 +1183,31 @@ public abstract class AffectedTestTask extends DefaultTask {
      *
      * <p>Package-private so {@code AffectedTestTaskExplainFormatTest}
      * can assert the format without spinning up Gradle.
+     *
+     * @param moduleGroups ordered map of {@code :module:test} task
+     *                     path → list of FQNs dispatched to that
+     *                     module. Pass {@link Map#of()} when no
+     *                     per-module breakdown applies (every
+     *                     situation other than
+     *                     {@link Situation#DISCOVERY_SUCCESS +
+     *                     SELECTED}). The renderer skips the
+     *                     "Modules:" block when the map is empty, so
+     *                     the trace stays compact on non-selective
+     *                     runs.
      */
     static List<String> renderExplainTrace(AffectedTestsConfig config, AffectedTestsResult result) {
+        // 2-arg overload: preserves the signature every unit test
+        // was written against before v2.2 added the per-module
+        // breakdown. The module block is a DISCOVERY_SUCCESS-only
+        // diagnostic that every non-dispatch unit test can safely
+        // skip by threading an empty map through to the 3-arg
+        // renderer.
+        return renderExplainTrace(config, result, Map.of());
+    }
+
+    static List<String> renderExplainTrace(AffectedTestsConfig config,
+                                           AffectedTestsResult result,
+                                           Map<String, List<String>> moduleGroups) {
         List<String> lines = new ArrayList<>();
         lines.add("=== Affected Tests — decision trace (--explain) ===");
         lines.add("Base ref:        " + config.baseRef());
@@ -1081,15 +1253,28 @@ public abstract class AffectedTestTask extends DefaultTask {
         }
         lines.add("Outcome:         " + outcome);
 
-        // Diagnostic hint: when out-of-scope dirs are configured but the
-        // bucket is empty, the config is almost certainly silently
-        // broken (wrong path, wrong glob shape, trailing-slash typo).
-        // We call it out inline so the operator sees the misconfiguration
-        // on the same trace that shows the buckets, rather than finding
-        // out 30 minutes later when a full suite runs that should have
-        // been skipped. Suppressed on empty-diff runs — there's nothing
-        // for the config to have bitten.
-        appendOutOfScopeHint(lines, config, result);
+        // Diagnostic hint: pick the hint that actually matches the
+        // situation the operator is staring at. Earlier versions
+        // unconditionally printed the out-of-scope hint on every
+        // mapper-touching situation, which meant a DISCOVERY_EMPTY run
+        // (no test mapped to the changed prod class) or
+        // DISCOVERY_INCOMPLETE run (parse failure dropped a file from
+        // the mapper) would show OOS advice that had nothing to do
+        // with the actual problem. v2.2 splits the hint into three
+        // targeted branches — see {@link #appendSituationHint} for the
+        // full routing.
+        appendSituationHint(lines, config, result);
+
+        // Per-module dispatch preview — populated only for
+        // SELECTED runs so the "what tasks will Gradle actually
+        // kick off?" question can be answered directly from the
+        // explain trace instead of a dry-run dispatch. On every
+        // other outcome the map is empty and we skip the block
+        // entirely to keep the trace compact. Shares the same
+        // {@link #groupFqnsByModule} as the real dispatch path so a
+        // SELECTED --explain line can never contradict what the
+        // next non-explain run will actually execute.
+        appendModulesBlock(lines, moduleGroups);
 
         // The full action matrix is cheap to print (five rows) and
         // invaluable for debugging "why did my explicit setting not
@@ -1108,44 +1293,64 @@ public abstract class AffectedTestTask extends DefaultTask {
     }
 
     /**
-     * Emits the "configured but matched nothing" hint for out-of-scope
-     * dirs when the signal points to a silent misconfiguration. Kept
-     * package-private so the explain-format tests can pin the exact
+     * Routes to the situation-specific hint block for the
+     * {@code --explain} trace. Kept package-private so
+     * {@code AffectedTestTaskExplainFormatTest} can pin the exact
      * conditions without spinning up Gradle.
      *
-     * <p>Gate: only {@link Situation#DISCOVERY_SUCCESS},
-     * {@link Situation#DISCOVERY_EMPTY}, and {@link Situation#DISCOVERY_INCOMPLETE}
-     * can have been influenced by an out-of-scope pattern — all three
-     * run the mapper over the full diff and only then route post-
-     * discovery. The other four situations reach their
-     * outcome for reasons the out-of-scope bucket cannot change:
-     * {@link Situation#EMPTY_DIFF} (no files to match),
-     * {@link Situation#ALL_FILES_IGNORED} (ignore wins before
-     * out-of-scope ever looks at the file),
-     * {@link Situation#ALL_FILES_OUT_OF_SCOPE} (bucket is non-empty, so
-     * the "silent" precondition is false — also caught by the
-     * bucket-empty guard below), and {@link Situation#UNMAPPED_FILE}
-     * (by construction the file missed every pattern, including
-     * out-of-scope). Firing here trains reviewers to ignore the hint
-     * on routine docs-only / gradle-only MRs — that's the v1.9.17
-     * sanity-test finding this gate exists to close.
-     *
-     * <p>Other preconditions: diff non-empty, at least one of
-     * {@code outOfScopeTestDirs} / {@code outOfScopeSourceDirs}
-     * configured, and the out-of-scope bucket empty.
+     * <p>Only the three mapper-touching situations produce hints in
+     * the v2.2+ trace: {@link Situation#DISCOVERY_SUCCESS} carries the
+     * original "out-of-scope configured but nothing matched"
+     * misconfiguration tell; {@link Situation#DISCOVERY_EMPTY} calls
+     * out the "mapped 0 tests" case with naming-suffix advice; and
+     * {@link Situation#DISCOVERY_INCOMPLETE} flags the parse-failure
+     * path so an operator doesn't silently accept a partial selection.
+     * The other four situations ({@link Situation#EMPTY_DIFF},
+     * {@link Situation#ALL_FILES_IGNORED},
+     * {@link Situation#ALL_FILES_OUT_OF_SCOPE},
+     * {@link Situation#UNMAPPED_FILE}) reach their outcome for reasons
+     * none of these hints can usefully add to — so we stay silent and
+     * let the {@code Outcome:} line speak for itself.
      */
-    static void appendOutOfScopeHint(List<String> lines,
-                                     AffectedTestsConfig config,
-                                     AffectedTestsResult result) {
-        Situation situation = result.situation();
-        if (situation != Situation.DISCOVERY_SUCCESS
-                && situation != Situation.DISCOVERY_EMPTY
-                && situation != Situation.DISCOVERY_INCOMPLETE) {
-            return;
+    static void appendSituationHint(List<String> lines,
+                                    AffectedTestsConfig config,
+                                    AffectedTestsResult result) {
+        // Note on the removed `changedFiles().isEmpty()` guard that
+        // lived here pre-v2.2.1: the three situations the switch routes
+        // (DISCOVERY_SUCCESS / DISCOVERY_EMPTY / DISCOVERY_INCOMPLETE)
+        // all definitionally require at least one changed file to
+        // reach them — EMPTY_DIFF is the "no files" situation and it
+        // falls through the default branch. The guard was unreachable
+        // in production and gave a misleading impression that
+        // changed-file-count was part of the hint gate, so deleting
+        // it keeps the dispatch contract legible.
+        switch (result.situation()) {
+            case DISCOVERY_SUCCESS     -> appendOutOfScopeMisconfigHint(lines, config, result);
+            case DISCOVERY_EMPTY       -> appendDiscoveryEmptyHint(lines, config, result);
+            case DISCOVERY_INCOMPLETE  -> appendDiscoveryIncompleteHint(lines, result);
+            default                    -> {
+                // No hint for EMPTY_DIFF / ALL_FILES_IGNORED /
+                // ALL_FILES_OUT_OF_SCOPE / UNMAPPED_FILE — see
+                // method-level javadoc for the per-situation rationale.
+            }
         }
-        if (result.changedFiles().isEmpty()) {
-            return;
-        }
+    }
+
+    /**
+     * Fires on {@link Situation#DISCOVERY_SUCCESS} when
+     * {@code outOfScopeTestDirs} / {@code outOfScopeSourceDirs} were
+     * configured but no file in the diff matched any of them. The
+     * heuristic catches the silent-misconfig case that lands
+     * OOS-shaped MRs (docs-only, tooling-only) into
+     * DISCOVERY_SUCCESS-instead-of-SKIPPED: wrong path, wrong glob
+     * shape, trailing-slash typo. Suppressed on runs where the OOS
+     * bucket actually non-empty — the configuration clearly works on
+     * this diff, so firing would only train reviewers to ignore the
+     * hint.
+     */
+    private static void appendOutOfScopeMisconfigHint(List<String> lines,
+                                                      AffectedTestsConfig config,
+                                                      AffectedTestsResult result) {
         if (!result.buckets().outOfScopeFiles().isEmpty()) {
             return;
         }
@@ -1171,6 +1376,135 @@ public abstract class AffectedTestTask extends DefaultTask {
                 + totalEntries + " " + entryWord + ") but no file in the diff matched.");
         lines.add("                 Values are directory prefixes "
                 + "(e.g. 'api-test/src/test/java') or globs (e.g. 'api-test/**').");
+    }
+
+    /**
+     * Fires on {@link Situation#DISCOVERY_EMPTY} — the engine mapped
+     * production .java changes but no test class matched any strategy.
+     * v2.1 printed the OOS hint here which was actively misleading
+     * because the OOS bucket by definition never influenced the
+     * outcome; v2.2 swaps in the three things that actually produce
+     * an empty discovery set: test-file naming mismatches the
+     * configured suffix list, the test lives outside the configured
+     * {@code testDirs}, or the prod class genuinely has no test
+     * coverage yet. We enumerate the first two with the operator's
+     * actual config values so the hint is self-checking.
+     */
+    private static void appendDiscoveryEmptyHint(List<String> lines,
+                                                 AffectedTestsConfig config,
+                                                 AffectedTestsResult result) {
+        int prodFileCount = result.buckets().productionFiles().size();
+        String fileWord = prodFileCount == 1 ? "file" : "files";
+        lines.add("Hint:            discovery mapped 0 test classes to the "
+                + prodFileCount + " changed production " + fileWord + ".");
+        lines.add("                 Common causes:");
+        lines.add("                  * test name does not match testSuffixes "
+                + formatInlineList(config.testSuffixes())
+                + " (e.g. Foo.java → FooTest.java / FooIT.java)");
+        lines.add("                  * test lives outside testDirs "
+                + formatInlineList(config.testDirs()));
+        lines.add("                  * the production class has no test coverage yet");
+    }
+
+    /**
+     * Fires on {@link Situation#DISCOVERY_INCOMPLETE} — one or more
+     * Java files in the diff failed to parse, so the mapper ran with
+     * missing inputs. Two shapes reach this hint:
+     *
+     * <ul>
+     *   <li>{@link Action#SELECTED} — LOCAL-mode default. The discovered
+     *       selection is definitionally partial, and the hint names
+     *       that risk explicitly plus the escalation knob an operator
+     *       can flip to move off the partial-selection default. Pairs
+     *       with the lifecycle WARN in
+     *       {@link #warnIfLocalDiscoveryIncompleteSelected}.</li>
+     *   <li>{@link Action#FULL_SUITE} — CI/STRICT default, or an
+     *       explicit {@code onDiscoveryIncomplete='full_suite'}
+     *       override. The whole suite runs, so "partial selection"
+     *       wording is actively wrong and "let onDiscoveryIncomplete
+     *       escalate" is circular — escalation already happened. We
+     *       render a trimmed hint that just names the parse failure
+     *       and the precise-selection follow-up.</li>
+     * </ul>
+     *
+     * <p>We don't count "parse failures" directly because the engine
+     * doesn't surface that number today; an operator who wants the
+     * exact file list reads the INFO-level engine log. The hint stays
+     * action-shape-agnostic on the file count so it can't drift into
+     * "0 files failed to parse" wording on edge cases.
+     */
+    private static void appendDiscoveryIncompleteHint(List<String> lines,
+                                                      AffectedTestsResult result) {
+        if (result.action() == Action.SELECTED) {
+            lines.add("Hint:            one or more Java files in the diff failed to parse, "
+                    + "so discovery ran with missing inputs.");
+            lines.add("                 The resolved selection is necessarily partial — fix the "
+                    + "parse error to recover a precise selection, or set "
+                    + "onDiscoveryIncomplete = 'full_suite' to escalate "
+                    + "(CI and STRICT modes already do).");
+            return;
+        }
+        // FULL_SUITE (or any non-SELECTED resolution): escalation has
+        // already handled the under-testing risk, so the hint's job
+        // is only to point the operator at the root cause for next
+        // time — NOT to repeat the escalation advice.
+        lines.add("Hint:            one or more Java files in the diff failed to parse, "
+                + "so discovery ran with missing inputs.");
+        lines.add("                 Fix the parse error to recover a precise selection on "
+                + "future runs (until then the resolved action above is the safe fallback).");
+    }
+
+    private static String formatInlineList(List<String> items) {
+        if (items.isEmpty()) {
+            return "[]";
+        }
+        return items.stream().collect(Collectors.joining(", ", "[", "]"));
+    }
+
+    /**
+     * Renders the "Modules:" section of the {@code --explain} trace.
+     * No-op when the map is empty — every non-SELECTED run threads an
+     * empty map through so those traces stay compact. On SELECTED
+     * runs we list each {@code :module:test} target with its class
+     * count, then up to
+     * {@link #LIFECYCLE_FQN_PREVIEW_LIMIT} FQNs per module, matching
+     * the same preview cap the actual dispatch path uses — so an
+     * operator comparing an {@code --explain} trace against a
+     * subsequent non-explain run sees the same preview shape.
+     *
+     * <p>Package-private so
+     * {@code AffectedTestTaskExplainFormatTest} can pin both the
+     * empty-map fast path and the preview shape without spinning up
+     * Gradle.
+     */
+    static void appendModulesBlock(List<String> lines, Map<String, List<String>> moduleGroups) {
+        if (moduleGroups == null || moduleGroups.isEmpty()) {
+            return;
+        }
+        int totalFqns = moduleGroups.values().stream().mapToInt(List::size).sum();
+        String moduleWord = moduleGroups.size() == 1 ? "module" : "modules";
+        String classWord = totalFqns == 1 ? "class" : "classes";
+        lines.add("Modules:         " + moduleGroups.size() + " " + moduleWord + ", "
+                + totalFqns + " test " + classWord + " to dispatch");
+        for (Map.Entry<String, List<String>> entry : moduleGroups.entrySet()) {
+            String taskPath = entry.getKey();
+            List<String> fqns = entry.getValue();
+            // A Gradle task path always starts with ':'; the dispatch
+            // helper stores plain `test` for the root project though,
+            // so normalise here to keep the explain output consistent
+            // with a Gradle-CLI-shaped task label in both cases.
+            String normalised = taskPath.startsWith(":") ? taskPath : ":" + taskPath;
+            int size = fqns.size();
+            String rowClassWord = size == 1 ? "class" : "classes";
+            lines.add("  " + normalised + " (" + size + " test " + rowClassWord + ")");
+            int preview = Math.min(size, LIFECYCLE_FQN_PREVIEW_LIMIT);
+            for (int i = 0; i < preview; i++) {
+                lines.add("    " + fqns.get(i));
+            }
+            if (size > preview) {
+                lines.add("    … and " + (size - preview) + " more (use --info for full list)");
+            }
+        }
     }
 
     private static void appendSample(List<String> lines, String label, Set<String> files) {

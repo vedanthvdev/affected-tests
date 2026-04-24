@@ -293,6 +293,116 @@ class AffectedTestsPluginTest {
         return project.getExtensions().getByType(AffectedTestsExtension.class);
     }
 
+    @Test
+    void modeIsUnsetByDefault() {
+        // Critical invariant: with no DSL and no -P, the extension's
+        // mode Property must read as absent so the core config's
+        // two-tier resolver falls through to AUTO. Installing a
+        // literal convention (e.g. "auto") would silently pin the
+        // task input and break cacheability across environments
+        // where AUTO would legitimately resolve differently.
+        //
+        // Note: ProjectBuilder isolates this test from the home
+        // `gradle.properties` file, but NOT from JVM system properties.
+        // If a developer runs the test JVM with
+        // `-DaffectedTestsMode=strict` (unusual but legal), Gradle's
+        // providers API surfaces it as a gradleProperty and the
+        // convention fires, flipping this assertion. If you see a
+        // surprising failure here, check `-D` args on the test JVM
+        // first — the contract under test is "no property ≠ no
+        // convention fired", not "no property ≠ JVM system hygiene".
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestsExtension ext = project.getExtensions()
+                .getByType(AffectedTestsExtension.class);
+        assertFalse(ext.getMode().isPresent(),
+                "mode must have no value when neither DSL nor -PaffectedTestsMode is set — "
+                        + "otherwise the core AUTO resolver never runs");
+    }
+
+    @Test
+    void dslDeclaredModeTakesPrecedenceOverAnyConvention() {
+        // Precedence contract: Gradle Property semantics mean
+        // explicit `set()` (DSL) always wins over `convention()`
+        // (our -PaffectedTestsMode fallback). Adopters need that so
+        // a stray CLI flag cannot silently override a repo's
+        // deliberately pinned mode. We can't exercise the real
+        // gradleProperty pipeline inside ProjectBuilder (it resolves
+        // against actual Gradle CLI state, not extra-properties), so
+        // the end-to-end `-P` wiring is pinned by the Cucumber e2e
+        // scenarios in 06-v2.2-adoption-feedback.feature. Here we
+        // guard the precedence half of the contract via an explicit
+        // convention() call — if someone inverts the resolution order
+        // or forgets to use convention(), this test catches it
+        // without depending on Gradle's CLI-property plumbing.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestsExtension ext = project.getExtensions()
+                .getByType(AffectedTestsExtension.class);
+        // Simulate "the plugin installed a convention of 'strict'"
+        // (which is what `-PaffectedTestsMode=strict` ends up doing
+        // through the providers API in a real build).
+        ext.getMode().convention("strict");
+        ext.getMode().set("ci");
+
+        assertEquals("ci", ext.getMode().get(),
+                "DSL-declared mode must win over any convention — swapping the precedence "
+                        + "would let a stray -P clobber a repo's pinned mode policy");
+    }
+
+    @Test
+    void affectedTestDependsOnTestClassesWhenExplainUnset() {
+        // Bug A paired-negative: the dispatch path must keep the
+        // `testClasses` dependency so the nested ./gradlew has class
+        // files to run against. If the Callable returns empty in
+        // both branches (regressing the fix to "always prune"), this
+        // test breaks because the dep disappears from the task.
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("java");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        var affectedTest = project.getTasks().getByName("affectedTest");
+        // Force task configuration so afterEvaluate / the
+        // dependsOn Callable registration has executed.
+        ((ProjectInternal) project).evaluate();
+
+        java.util.Set<?> deps = affectedTest.getTaskDependencies()
+                .getDependencies(affectedTest);
+        boolean pullsInTestClasses = deps.stream()
+                .anyMatch(t -> t instanceof org.gradle.api.Task
+                        && ((org.gradle.api.Task) t).getName().equals("testClasses"));
+        assertTrue(pullsInTestClasses,
+                "Without --explain the dispatch path MUST pre-compile test classes so the "
+                        + "nested gradle invocation finds something to run — pruning always would "
+                        + "re-break the original reason the dependency existed");
+    }
+
+    @Test
+    void affectedTestPrunesTestClassesWhenExplainSet() {
+        // Bug A positive: flipping --explain on must short-circuit
+        // the testClasses dependency. Asserted at the Callable
+        // output level so a regression here surfaces independently
+        // of the Cucumber e2e scenario (which exercises it via the
+        // real Gradle runtime).
+        Project project = ProjectBuilder.builder().build();
+        project.getPlugins().apply("java");
+        project.getPlugins().apply("io.github.vedanthvdev.affectedtests");
+
+        AffectedTestTask task = (AffectedTestTask) project.getTasks().getByName("affectedTest");
+        task.getExplain().set(true);
+        ((ProjectInternal) project).evaluate();
+
+        java.util.Set<?> deps = task.getTaskDependencies().getDependencies(task);
+        boolean pullsInTestClasses = deps.stream()
+                .anyMatch(t -> t instanceof org.gradle.api.Task
+                        && ((org.gradle.api.Task) t).getName().equals("testClasses"));
+        assertFalse(pullsInTestClasses,
+                "With --explain set the Callable MUST prune testClasses from the task "
+                        + "dependency set — otherwise the diagnostic flag keeps paying compile cost");
+    }
+
     private static void assertAllAbsent(Class<?> type,
                                         java.util.List<String> forbiddenNames,
                                         String surfaceLabel) {

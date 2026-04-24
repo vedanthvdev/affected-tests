@@ -458,13 +458,12 @@ class AffectedTestTaskExplainFormatTest {
     void hintFiresOnDiscoveryEmptyFullSuiteEscalation() {
         // Positive case: when the diff changed real production code but
         // discovery found zero affected tests, the engine escalates to
-        // FULL_SUITE under the CI mode's safety net. The hint is STILL
-        // useful here — if the user had outOfScopeSourceDirs meant to
-        // exclude this production file from dispatching tests and the
-        // pattern silently didn't bite, the FULL_SUITE escalation is the
-        // unnecessary waste the hint exists to expose. Lock in that the
-        // situation-gate in appendOutOfScopeHint includes DISCOVERY_EMPTY
-        // alongside DISCOVERY_SUCCESS.
+        // FULL_SUITE under the CI mode's safety net. Pre-v2.2 the hint
+        // here was the OOS-misconfig text; v2.2 replaces it with the
+        // "discovery mapped 0 test classes" advice (naming suffixes,
+        // testDirs, no-coverage-yet). Either way the `Hint:` line
+        // must be present — its absence would silence the most
+        // expensive diagnostic signal the plugin emits.
         AffectedTestsConfig config = AffectedTestsConfig.builder()
                 .outOfScopeSourceDirs(List.of("legacy-service/**"))
                 .build();
@@ -539,5 +538,492 @@ class AffectedTestTaskExplainFormatTest {
 
         assertFalse(trace.contains("Hint:"),
                 "Hint must stay silent when there are no changed files — nothing to diagnose");
+    }
+
+    // ------------------------------------------------------------------
+    // v2.2 — situation-specific Hint branches
+    //
+    // Pre-v2.2 every mapper-touching situation produced the same
+    // "outOfScopeTestDirs is configured but no file matched" hint.
+    // That was actively misleading on DISCOVERY_EMPTY runs (where the
+    // OOS knob was not the reason discovery mapped zero tests) and
+    // on DISCOVERY_INCOMPLETE runs (where a Java parse failure, not
+    // an OOS matcher, dropped files from the mapper). v2.2 splits
+    // the single hint into three targeted branches; these tests
+    // lock in each branch's content so regressions show up as test
+    // failures rather than as user-invisible wording drift.
+    // ------------------------------------------------------------------
+
+    @Test
+    void discoveryEmptyHintNamesNamingSuffixesAndTestDirs() {
+        // When the engine maps zero tests to a production change, the
+        // three realistic causes are: test-suffix mismatch, a test
+        // file outside the configured testDirs, or genuinely no test
+        // coverage yet. The hint must list all three in that order
+        // with the user's actual config values so they can self-check
+        // "does my testSuffixes list include 'IT'?" without leaving
+        // the trace. Verifying the content here (not just "Hint:"
+        // presence) would have caught the pre-v2.2 behaviour where
+        // this situation silently printed out-of-scope-dirs advice.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .testSuffixes(List.of("Test", "IT"))
+                .testDirs(List.of("src/test/java"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                true, false,
+                Situation.DISCOVERY_EMPTY, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_IF_NO_MATCHES);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("Hint:            discovery mapped 0 test classes"),
+                "DISCOVERY_EMPTY hint must lead with 'mapped 0 test classes' — that names the "
+                        + "actual shape of the problem, not an unrelated OOS misconfig claim. Got:\n" + trace);
+        assertTrue(trace.contains("testSuffixes [Test, IT]"),
+                "Hint must echo the user's configured testSuffixes so they can verify "
+                        + "the naming convention matches their test files. Got:\n" + trace);
+        assertTrue(trace.contains("testDirs [src/test/java]"),
+                "Hint must echo testDirs so the operator can spot a test file placed "
+                        + "outside the configured roots. Got:\n" + trace);
+        assertTrue(trace.contains("no test coverage yet"),
+                "Hint must explicitly call out the no-coverage case — otherwise users with "
+                        + "genuinely untested classes will loop on naming suggestions. Got:\n" + trace);
+        assertFalse(trace.contains("outOfScopeTestDirs") || trace.contains("outOfScopeSourceDirs"),
+                "DISCOVERY_EMPTY hint must NOT mention out-of-scope knobs — OOS is orthogonal "
+                        + "to why discovery mapped 0 tests, and surfacing it was the exact confusion "
+                        + "v2.1 produced. Got:\n" + trace);
+    }
+
+    @Test
+    void discoveryIncompleteHintCallsOutPartialSelectionRisk() {
+        // Parse failure means the mapper ran with missing inputs.
+        // The v2.1 trace printed "outOfScopeTestDirs is configured"
+        // here too, even when the user had no OOS entries — pure
+        // noise. v2.2 replaces that with the thing the operator
+        // actually needs to know: the selection is partial, and the
+        // fix is to either repair the parse error or escalate via
+        // onDiscoveryIncomplete.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("failed to parse"),
+                "DISCOVERY_INCOMPLETE hint must name the parse-failure cause so the "
+                        + "operator understands why selection is partial. Got:\n" + trace);
+        assertTrue(trace.contains("selection is necessarily partial"),
+                "Hint must explicitly warn that the selection is partial — that's the "
+                        + "silent correctness risk v2.2 was raised to surface. Got:\n" + trace);
+        assertTrue(trace.contains("onDiscoveryIncomplete"),
+                "Hint must name the knob that toggles this behaviour so the operator "
+                        + "has an actionable next step. Got:\n" + trace);
+    }
+
+    @Test
+    void discoveryIncompleteHintOnFullSuiteDropsPartialSelectionWording() {
+        // v2.2.1 fix (H3 from CAR-5190 code review): CI/STRICT
+        // defaults — and explicit operator overrides — route
+        // DISCOVERY_INCOMPLETE to FULL_SUITE. The old shared hint
+        // claimed the "selection is necessarily partial" which is
+        // factually wrong (the full suite ran) and advised escalating
+        // via onDiscoveryIncomplete which is circular (escalation
+        // already happened). Pin the corrected wording: the hint
+        // names the parse failure as the root cause but does NOT
+        // claim a partial selection, and does NOT re-recommend the
+        // escalation that the current run already took.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().mode(Mode.CI).build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"), Set.of(),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                true, false,
+                Situation.DISCOVERY_INCOMPLETE, Action.FULL_SUITE,
+                EscalationReason.RUN_ALL_ON_NON_JAVA_CHANGE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("failed to parse"),
+                "FULL_SUITE hint must still name the parse-failure cause so the operator "
+                        + "can fix it next run. Got:\n" + trace);
+        assertFalse(trace.contains("selection is necessarily partial"),
+                "FULL_SUITE ran the whole suite — claiming the selection was partial "
+                        + "contradicts the resolved action and actively misleads the operator. "
+                        + "Got:\n" + trace);
+        assertFalse(trace.contains("onDiscoveryIncomplete = 'full_suite' to escalate"),
+                "The escalation has already happened on this run — repeating the 'set it "
+                        + "to full_suite' advice is circular and trains operators to "
+                        + "ignore the hint. Got:\n" + trace);
+    }
+
+    @Test
+    void discoverySuccessHintKeepsV2dot1OutOfScopeMisconfigWording() {
+        // Regression: v2.2's hint refactor must preserve the single
+        // DISCOVERY_SUCCESS case v2.1 actually diagnosed correctly —
+        // "outOfScopeTestDirs is configured (N entries) but no file
+        // in the diff matched." Losing that would take the plugin
+        // backwards, since the silent-OOS-misconfig is exactly the
+        // failure mode the pre-v1.9.17 sanity-test caught.
+        AffectedTestsConfig config = AffectedTestsConfig.builder()
+                .outOfScopeTestDirs(List.of("api-test/**"))
+                .build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result));
+
+        assertTrue(trace.contains("outOfScopeTestDirs is configured (1 entry)"),
+                "DISCOVERY_SUCCESS must still surface the OOS-configured-but-nothing-matched "
+                        + "misconfig — that's the v2.1 behaviour we are NOT breaking. Got:\n" + trace);
+    }
+
+    // ------------------------------------------------------------------
+    // v2.2 — Modules: per-task dispatch preview in --explain
+    // ------------------------------------------------------------------
+
+    @Test
+    void modulesBlockIsAbsentWhenNoGroupsPassed() {
+        // Every pre-v2.2 caller (and every non-SELECTED situation in
+        // v2.2) threads an empty map — the trace must stay compact
+        // in that case. Otherwise every EMPTY_DIFF / SKIPPED run
+        // would grow a useless "Modules: 0 modules, 0 test classes"
+        // line.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of(), Map.of(),
+                Set.of(), Set.of(), Set.of(),
+                Buckets.empty(),
+                false, true,
+                Situation.EMPTY_DIFF, Action.SKIPPED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result, Map.of()));
+
+        assertFalse(trace.contains("Modules:"),
+                "Modules block must be suppressed on empty map — SELECTED is the only "
+                        + "situation where dispatch preview is meaningful. Got:\n" + trace);
+    }
+
+    @Test
+    void modulesBlockRendersPerTaskBreakdownForMultiModuleSelection() {
+        // The real-world adoption scenario: production change in one
+        // module (`api/`) dispatches tests into another (`application/`).
+        // v2.1's --explain trace gave only a total test count and left
+        // the operator guessing which task Gradle would actually
+        // invoke. v2.2 prints the per-:module:test breakdown matching
+        // the real dispatch output so an --explain run answers the
+        // "what will Gradle kick off?" question directly.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest", "com.example.BarTest", "com.example.BazTest"),
+                Map.of(),
+                Set.of("api/src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest", "com.example.BarTest", "com.example.BazTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("api/src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        Map<String, List<String>> groups = new java.util.LinkedHashMap<>();
+        groups.put(":application:test", List.of("com.example.FooTest", "com.example.BarTest"));
+        groups.put(":api:test", List.of("com.example.BazTest"));
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result, groups));
+
+        assertTrue(trace.contains("Modules:         2 modules, 3 test classes to dispatch"),
+                "Modules summary must count modules and classes so the operator can eyeball "
+                        + "the dispatch shape before running. Got:\n" + trace);
+        assertTrue(trace.contains(":application:test (2 test classes)"),
+                "Per-module row must name the task path and class count — exact same preview "
+                        + "shape as the non-explain dispatch log, so switching between modes is "
+                        + "a cognitive no-op. Got:\n" + trace);
+        assertTrue(trace.contains(":api:test (1 test class)"),
+                "Singular form 'test class' must render for 1-class modules — keeps the "
+                        + "preview grammatical on small dispatches. Got:\n" + trace);
+        assertTrue(trace.contains("    com.example.FooTest")
+                        && trace.contains("    com.example.BarTest"),
+                "Per-module FQN preview must indent the FQNs under their module row so the "
+                        + "hierarchy reads naturally. Got:\n" + trace);
+    }
+
+    @Test
+    void testTaskPathHelperNormalisesRootProjectToLeadingColon() {
+        // v2.2.1 (N1 from the code review): both the explain-block
+        // preview and the dispatch argv go through the shared
+        // AffectedTestTask#testTaskPath helper so the two operator-
+        // facing strings cannot drift. Pin the root-project case
+        // ("" → ":test") directly on the helper — the explain-side
+        // rendering just iterates this helper's output, so a
+        // per-renderer test would duplicate coverage.
+        assertTrue(":test".equals(AffectedTestTask.testTaskPath("")),
+                "Empty project path (root project) must render as ':test' with a leading "
+                        + "colon so explain and dispatch name the task identically");
+        assertTrue(":api:test".equals(AffectedTestTask.testTaskPath(":api")),
+                "Non-root project path must suffix ':test' — regression on this shape "
+                        + "would make every non-root dispatch target the wrong task name");
+    }
+
+    @Test
+    void modulesBlockRendersHelperNormalisedRootTask() {
+        // Paired assertion: once the helper returns ':test', the
+        // renderer must pass it through verbatim. Prevents a drift
+        // where someone "fixes" the helper but leaves the renderer
+        // stripping the colon for root-module aesthetic reasons.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.of("com.example.FooTest"), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.of("com.example.FooTest"),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result,
+                Map.of(AffectedTestTask.testTaskPath(""),
+                        List.of("com.example.FooTest"))));
+
+        assertTrue(trace.contains(":test (1 test class)"),
+                "Root-project task must render as ':test' in the explain trace so every row "
+                        + "reads as a Gradle task path. Got:\n" + trace);
+    }
+
+    @Test
+    void modulesBlockTruncatesWithAndNMoreLineOverPreviewLimit() {
+        // Match the dispatch-path preview behaviour: print the first
+        // LIFECYCLE_FQN_PREVIEW_LIMIT FQNs, then a single "… and N
+        // more (use --info for full list)" trailer. Parity with the
+        // dispatch preview means an --explain run and a subsequent
+        // non-explain run show the same first N names — no cognitive
+        // load to map one to the other.
+        AffectedTestsConfig config = AffectedTestsConfig.builder().build();
+        List<String> fqns = new java.util.ArrayList<>();
+        for (int i = 0; i < AffectedTestTask.LIFECYCLE_FQN_PREVIEW_LIMIT + 3; i++) {
+            fqns.add("com.example.Test" + i);
+        }
+        AffectedTestsResult result = new AffectedTestsResult(
+                Set.copyOf(fqns), Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"),
+                Set.copyOf(fqns),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, false,
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED,
+                EscalationReason.NONE);
+
+        String trace = joined(AffectedTestTask.renderExplainTrace(config, result,
+                Map.of(":application:test", fqns)));
+
+        assertTrue(trace.contains("… and 3 more (use --info for full list)"),
+                "Trailer must name the remainder count and point at --info for the full set "
+                        + "— any other phrasing drifts from the dispatch-path preview and trains "
+                        + "operators to mistrust the trace. Got:\n" + trace);
+    }
+
+    // ------------------------------------------------------------------
+    // v2.2 — Risk C: LOCAL + DISCOVERY_INCOMPLETE + SELECTED WARN gate
+    //
+    // The instance method that actually emits the WARN is one-liner
+    // plumbing over the Gradle logger; all decision logic lives in
+    // shouldWarnLocalDiscoveryIncomplete (pure) and the message in
+    // formatLocalDiscoveryIncompleteWarning (pure). The tests exercise
+    // each guard on the pure gate so a regression on any of the four
+    // conditions (mode, situation, action, skipped/empty) surfaces in
+    // ms — without requiring a log-capture fixture — and mirrors what
+    // the Javadoc already promised.
+    // ------------------------------------------------------------------
+    private static AffectedTestsConfig configWithMode(Mode mode) {
+        return AffectedTestsConfig.builder().mode(mode).build();
+    }
+
+    private static AffectedTestsResult makeResult(Situation situation,
+                                                  Action action,
+                                                  boolean skipped,
+                                                  int fqnCount) {
+        Set<String> fqns = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < fqnCount; i++) {
+            fqns.add("com.example.Test" + i);
+        }
+        return new AffectedTestsResult(
+                fqns, Map.of(),
+                Set.of("src/main/java/com/example/Foo.java"),
+                Set.of("com.example.Foo"), Set.copyOf(fqns),
+                new Buckets(Set.of(), Set.of(),
+                        Set.of("src/main/java/com/example/Foo.java"),
+                        Set.of(), Set.of()),
+                false, skipped,
+                situation, action,
+                EscalationReason.NONE);
+    }
+
+    @Test
+    void riskCWarnFiresOnLocalDiscoveryIncompleteSelectedWithFqns() {
+        // The one combination the v2.2 fix was added for: LOCAL keeps
+        // `onDiscoveryIncomplete = SELECTED` by design, so the engine
+        // hands back a non-empty partial selection and the task must
+        // surface that silently-partial result to the operator.
+        AffectedTestsConfig config = configWithMode(Mode.LOCAL);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED, false, 3);
+
+        assertTrue(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "LOCAL + DISCOVERY_INCOMPLETE + SELECTED + non-empty FQNs is the exact "
+                        + "v2.2 Risk C scenario — dropping the WARN here re-opens the silent "
+                        + "partial-selection hole that CAR-5190 surfaced");
+    }
+
+    @Test
+    void riskCWarnSuppressedInCiModeOnIdenticalResult() {
+        // CI (and STRICT) default onDiscoveryIncomplete to FULL_SUITE
+        // so the engine never hands them a "SELECTED on incomplete
+        // discovery" result through the mode default. But a CI
+        // operator who explicitly overrode that to SELECTED should
+        // still NOT see a LOCAL-branded WARN — it would name the
+        // wrong mode and mis-guide the operator. Pin the gate on
+        // effectiveMode, not on the situation alone.
+        AffectedTestsConfig config = configWithMode(Mode.CI);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED, false, 3);
+
+        assertFalse(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "CI must never emit the LOCAL-specific WARN — wording names LOCAL's "
+                        + "onDiscoveryIncomplete default and would be factually wrong in CI");
+    }
+
+    @Test
+    void riskCWarnSuppressedOnDiscoverySuccess() {
+        // DISCOVERY_SUCCESS with no parse failures is the happy path.
+        // The WARN is for parse-failure-induced partial selections
+        // specifically — any other situation triggering it would train
+        // operators that the signal means nothing.
+        AffectedTestsConfig config = configWithMode(Mode.LOCAL);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_SUCCESS, Action.SELECTED, false, 3);
+
+        assertFalse(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "DISCOVERY_SUCCESS must never emit the WARN — there is no incomplete "
+                        + "discovery to warn about");
+    }
+
+    @Test
+    void riskCWarnSuppressedOnFullSuiteEscalation() {
+        // An operator running LOCAL mode with an explicit
+        // `onDiscoveryIncomplete='full_suite'` override gets
+        // DISCOVERY_INCOMPLETE + FULL_SUITE. No silent partial
+        // selection exists (the full suite will run), so the WARN
+        // would contradict the explicit operator choice.
+        AffectedTestsConfig config = configWithMode(Mode.LOCAL);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_INCOMPLETE, Action.FULL_SUITE, false, 0);
+
+        assertFalse(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "FULL_SUITE escalation removes the under-testing risk — the WARN must "
+                        + "NOT fire or it would contradict the operator's explicit choice to "
+                        + "escalate");
+    }
+
+    @Test
+    void riskCWarnSuppressedWhenEngineRewritesToSkipped() {
+        // The engine treats SELECTED with nothing to dispatch as
+        // skipped=true (`action == SELECTED && situation != DISCOVERY_SUCCESS`
+        // → skipped). Without this guard the WARN would fire
+        // "(0 test classes)" and then the task would bail before
+        // running anything — two contradictory log lines from the
+        // same code path.
+        AffectedTestsConfig config = configWithMode(Mode.LOCAL);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED, true, 0);
+
+        assertFalse(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "skipped=true means the engine already routed this run to nothing-to-dispatch "
+                        + "— firing the WARN would claim a partial selection was accepted when "
+                        + "nothing was actually dispatched");
+    }
+
+    @Test
+    void riskCWarnSuppressedWhenFqnListIsEmptyWithoutSkipped() {
+        // Defensive: should-never-happen but if a future code path
+        // lands SELECTED + empty FQNs without the skipped flag, the
+        // WARN must still suppress so an operator is never told a
+        // zero-count selection was "accepted".
+        AffectedTestsConfig config = configWithMode(Mode.LOCAL);
+        AffectedTestsResult result = makeResult(
+                Situation.DISCOVERY_INCOMPLETE, Action.SELECTED, false, 0);
+
+        assertFalse(AffectedTestTask.shouldWarnLocalDiscoveryIncomplete(config, result),
+                "Empty FQN list means no partial selection was actually honoured — the "
+                        + "WARN must suppress even if the engine forgot to mark the result skipped");
+    }
+
+    @Test
+    void riskCWarnMessageNamesMarkerAndEscalationKnob() {
+        // The marker substring doubles as a grep target for CI
+        // alerting (see LOCAL_DISCOVERY_INCOMPLETE_WARNING_MARKER
+        // javadoc) and the message must name the exact knob an
+        // operator can flip — anything vaguer sends the operator
+        // grepping through the CHANGELOG.
+        String message = AffectedTestTask.formatLocalDiscoveryIncompleteWarning(3);
+
+        assertTrue(message.contains(AffectedTestTask.LOCAL_DISCOVERY_INCOMPLETE_WARNING_MARKER),
+                "Message must contain the stable marker substring so grep-based alerting "
+                        + "keeps working across wording refreshes");
+        assertTrue(message.contains("3 test classes"),
+                "Plural form must render the count — ambiguity on "
+                        + "'how much did we actually accept' defeats the WARN's purpose. Got: "
+                        + message);
+        assertTrue(message.contains("onDiscoveryIncomplete = 'full_suite'"),
+                "Message must name the exact knob so the fix is mechanical, not a "
+                        + "CHANGELOG-grep exercise. Got: " + message);
+    }
+
+    @Test
+    void riskCWarnMessageUsesSingularForExactlyOneFqn() {
+        // Plurality drift between "1 test class" and "1 test classes"
+        // is the sort of micro-bug that makes the message read like
+        // it was written by someone who doesn't use English, and
+        // operators lose trust fast. Pin it.
+        String message = AffectedTestTask.formatLocalDiscoveryIncompleteWarning(1);
+
+        assertTrue(message.contains("1 test class "),
+                "Singular 1 must render as '1 test class' (no trailing s) — got: " + message);
+        assertFalse(message.contains("1 test classes"),
+                "Plural fallthrough on count=1 would look like a generated-from-template "
+                        + "bug and cost the signal its credibility. Got: " + message);
     }
 }
