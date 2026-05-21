@@ -60,7 +60,7 @@ dependencies {
     // into step-def classes; without a DI container, CucumberException
     // "No suitable constructor" blows up at scenario discovery time.
     functionalTestImplementation 'io.cucumber:cucumber-picocontainer:7.25.0'
-    functionalTestImplementation 'org.junit.platform:junit-platform-suite:1.14.3'
+    functionalTestImplementation 'org.junit.platform:junit-platform-suite:6.1.0'
     // JGit mirrors the way the core engine tests construct temp repos —
     // reusing the same dependency means the feature-file scenarios build
     // history with the exact semantics the engine will later parse.
