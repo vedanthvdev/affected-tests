@@ -22,8 +22,8 @@ dependencies {
     // embeddable on testRuntimeClasspath or every KotlinCoreEnvironment
     // reference fails class-load with NoClassDefFoundError. See
     // docs/PHASE-2-KOTLIN-AST.md §4 for the version-pin policy.
-    compileOnly 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.1.20'
-    testImplementation 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.1.20'
+    compileOnly 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.21'
+    testImplementation 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.21'
 }
 
 // Forward the specific affected-tests.* system properties that the

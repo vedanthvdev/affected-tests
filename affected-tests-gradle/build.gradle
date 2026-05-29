@@ -23,7 +23,7 @@ dependencies {
     // compileOnly because its runtime is satisfied by the shaded JAR
     // at adopter sites. Pinned version policy: see
     // docs/PHASE-2-KOTLIN-AST.md §4.
-    implementation 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.1.20'
+    implementation 'org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.21'
 }
 
 version = rootProject.version
