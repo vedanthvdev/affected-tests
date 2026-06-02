@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Synced the README `--explain --explain-format=json` sample with
+  the shipped schema v3 output, including the additive `discovery`
+  and `headerEdges` blocks plus the schema-versioning policy for
+  consumers (issue #104).
+
 ### Added — `headerEdges` discovery strategy (issue #132)
 
 Adds a fifth, default-on discovery strategy that closes the Spring DI

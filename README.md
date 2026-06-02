@@ -143,7 +143,11 @@ Field-by-field semantics:
 | `action` | object | `name` is one of `SELECTED` / `FULL_SUITE` / `SKIPPED`; `source` says which configuration tier resolved it (`MODE_DEFAULT` / `EXPLICIT`). |
 | `outcome` | object | `kind` mirrors `action.name`; `selectedClassCount` is meaningful on `SELECTED` runs (and `0` elsewhere); `escalationReason` is the same enum the text trace renders in the `Outcome:` line. |
 | `modules` | array | One entry per dispatched `:module:test` task (empty on non-`SELECTED` runs). Each entry carries the canonical task path and the full FQN list — no truncation, since this is the actionable downstream-routing surface. |
+| `discovery` | object | Always present. Carries discovery execution metadata: total wall time (`totalMs`), worker count (`threads`), and per-strategy timing / contribution details under `strategies`. Empty-diff / test-only fast paths emit zero defaults and an empty strategies object. |
+| `headerEdges` | object | Always present. Carries the header-edge augmentation summary added in schema v3: augmented type count (`added`), sibling-cap suppression count (`suppressed`), sampled suppressed FQNs, and per-edge source / target / category / status entries. The no-op shape is zero counts plus empty arrays. |
 | `actionMatrix` | object | Every `Situation` enum value maps to its `{action, source}` pair. Pinned in tests so a future engine that adds a situation also has to update the JSON renderer. |
+
+Fields may be added without bumping `version`. Removing or renaming fields, changing field types, or changing existing field semantics requires a version bump. Consumers should parse defensively by ignoring unknown fields.
 
 The text format remains the default — JSON is opt-in. Switching format never invalidates a Gradle cached execution because `--explain-format` only changes lifecycle logging, never the set of tests Gradle would actually run.
 
