@@ -19,6 +19,12 @@ contributions help the plugin compound:
 | **Mode profile change, default flip** | High — open an issue first. A mode default is a behaviour change for every adopter on `mode = 'auto'`, so the discussion is "what does this break?", not "is this code correct?" |
 | **Kotlin/Groovy/Scala source mapping** | Tracked in #47 — a Phase-1 docs PR is welcome any time; Phase-2 (real mapping support) needs a tech plan. |
 
+Operator-facing guidance belongs in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Use it as
+the canonical home for performance tuning, CI checkout failures,
+cache invalidation, platform notes, and diagnostic recipes instead
+of scattering those details across issues or PR comments.
+
 ## How to set up locally
 
 ```bash

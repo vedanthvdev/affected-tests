@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Added `docs/TROUBLESHOOTING.md` as the central operator guide for
+  performance tuning, shallow-clone and in-process git failures,
+  discovery-incomplete runs, platform notes, cache invalidation,
+  diagnostic recipes, and useful bug reports. README and CONTRIBUTING
+  now link to it.
+
 ### Added — `headerEdges` discovery strategy (issue #132)
 
 Adds a fifth, default-on discovery strategy that closes the Spring DI
