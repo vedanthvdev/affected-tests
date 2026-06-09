@@ -147,6 +147,11 @@ Field-by-field semantics:
 
 The text format remains the default — JSON is opt-in. Switching format never invalidates a Gradle cached execution because `--explain-format` only changes lifecycle logging, never the set of tests Gradle would actually run.
 
+Need operational help? See
+[Troubleshooting & Performance Tuning](docs/TROUBLESHOOTING.md)
+for shallow clone setup, cache invalidation, parser opt-outs, and
+`--explain` recipes.
+
 That's it. With zero config, the plugin will:
 
 - Diff against `origin/master` (including uncommitted + staged changes).
