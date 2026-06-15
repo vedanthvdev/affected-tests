@@ -261,7 +261,7 @@ dependencies {
     // JGit mirrors the way the core engine tests construct temp repos —
     // reusing the same dependency means the feature-file scenarios build
     // history with the exact semantics the engine will later parse.
-    functionalTestImplementation 'org.eclipse.jgit:org.eclipse.jgit:7.6.0.202603022253-r'
+    functionalTestImplementation 'org.eclipse.jgit:org.eclipse.jgit:7.7.0.202606012155-r'
 }
 
 tasks.register('functionalTest', Test) {
