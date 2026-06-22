@@ -9,7 +9,7 @@ plugins {
     // marker publication — and adds GPG signing + sources/javadoc JARs
     // (both required by Central) without disturbing the Plugin Portal
     // publish path. See issue #87.
-    id 'com.vanniktech.maven.publish' version '0.36.0'
+    id 'com.vanniktech.maven.publish' version '0.37.0'
 }
 
 dependencies {
