@@ -343,8 +343,14 @@ New CLI option on the `affectedTest` task:
 
 ```bash
 ./gradlew affectedTest --explain   # prints decision tree, does not execute tests
-./gradlew affectedTest --dry-run   # alias
 ```
+
+There is deliberately no `--dry-run` alias: `--dry-run` collides with
+Gradle's own build-level flag, which the CLI parser resolves before any
+task option, so `./gradlew affectedTest --dry-run` runs Gradle's
+task-graph preview (`:affectedTest SKIPPED`) and never reaches the task
+(verified on the wrapper-pinned Gradle 9.x by functional test
+`12-issue-109-dry-run-alias`). Use `--explain` for the decision trace.
 
 Output format (example):
 
@@ -439,9 +445,11 @@ directly instead of working around the tool.
 - Legacy `runAllIfNoMatches` / `runAllOnNonJavaChange` booleans: if set,
   they translate into the new situation config. No deprecation warning
   yet.
-- Add `--explain` / `--dry-run` task option. Implementation: new task
+- Add an `--explain` task option. Implementation: new task
   property that short-circuits `executeTests` and prints the structured
-  trace shown in §3.6.
+  trace shown in §3.6. (The originally sketched `--dry-run` alias was
+  dropped: Gradle's build-level `--dry-run` shadows any task option of
+  the same name — see §3.6.)
 - New `EscalationReason` enum values:
   `SKIPPED_EMPTY_DIFF`, `SKIPPED_ALL_IGNORED`, `SKIPPED_ALL_OUT_OF_SCOPE`,
   `FULL_SUITE_UNMAPPED`, `FULL_SUITE_DISCOVERY_EMPTY`. Extend

@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation — removed the unimplemented `--dry-run` alias (issue #109)
+
+`docs/DESIGN-v2.md` documented `--dry-run` as a task-flag alias for
+`--explain`, but the option was never wired on `AffectedTestTask`, and
+implementing it is impossible: Gradle's CLI parser resolves the
+build-level `--dry-run` before any task option, so
+`./gradlew affectedTest --dry-run` shows the task-graph preview
+(`:affectedTest SKIPPED`) and never reaches the task. The alias claim
+is removed, the collision is documented in §3.6, and a functional
+scenario pins the behaviour so the doc cannot drift back.
+
 ### Added — `headerEdges` discovery strategy (issue #132)
 
 Adds a fifth, default-on discovery strategy that closes the Spring DI
