@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Tests — JUnit 5 shapes functional coverage (issue #125)
+
+Adds `13-issue-125-junit5-shapes.feature`: `@Nested`,
+`@ParameterizedTest`, `@TestFactory` and `@Tag` test sources were
+exercised by no functional scenario, so both the discovery mapping
+(file → top-level FQN) and the dispatch contract (does
+`--tests com.example.OuterTest` actually run the nested /
+parameterised / dynamic / tagged tests inside the selected class?)
+were unverified. The feature pins the discovery side in-harness and
+documents the execution side, verified empirically on the
+wrapper-pinned Gradle 9.5.1 with JUnit 6.1.0: a class-name `--tests`
+filter covers nested classes and expands parameterised rows and
+dynamic tests, and a consumer's `useJUnitPlatform { includeTags }`
+ANDs with the plugin's filter, so tag-based partitioning keeps
+working. No bug found — no follow-up issue needed.
+
 ### Added — `headerEdges` discovery strategy (issue #132)
 
 Adds a fifth, default-on discovery strategy that closes the Spring DI
